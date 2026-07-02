@@ -29,9 +29,11 @@ for _stream in (sys.stdout, sys.stderr):
 from evhedge.config_io import ConfigError, load_full_config
 from evhedge.engine import compute_ev
 from evhedge.montecarlo import plot_distribution, simulate
+from evhedge.ranking import load_configs_from_dir, rank_teams
 
 console = Console(width=120)
 error_console = Console(width=120, stderr=True, style="bold red")
+warn_console = Console(width=120, style="yellow")
 
 #: Sports evhedge example currently knows how to generate a template for.
 SUPPORTED_EXAMPLE_SPORTS = ("football",)
@@ -217,6 +219,75 @@ def example_command(sport: str, out: Path, force: bool) -> None:
 
     out.write_text(_EXAMPLE_TEMPLATES[sport], encoding="utf-8")
     console.print(f"Пример конфига сохранён: {out}")
+
+
+@main.command("rank")
+@click.argument("configs_dir", type=click.Path(path_type=Path))
+@click.option(
+    "--sort-by",
+    type=click.Choice(["ev", "ev_pct", "sharpe"]),
+    default="ev",
+    help="Metric to sort by (default: ev).",
+)
+@click.option("--mc", "mc_trials", type=int, default=5000, help="Monte Carlo trials per config.")
+@click.option("--seed", type=int, default=None, help="Seed for Monte Carlo (same seed for all configs).")
+@click.option("--top", type=int, default=None, help="Only show the top K rows.")
+def rank_command(
+    configs_dir: Path,
+    sort_by: str,
+    mc_trials: int,
+    seed: Optional[int],
+    top: Optional[int],
+) -> None:
+    """Rank every *.yaml/*.yml config in CONFIGS_DIR by EV."""
+    try:
+        configs, failures = load_configs_from_dir(configs_dir)
+    except ConfigError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if not configs:
+        error_console.print(
+            f"Не удалось загрузить ни одного валидного конфига из {configs_dir}."
+        )
+        sys.exit(1)
+
+    rows = rank_teams(configs, mc_trials=mc_trials, seed=seed, sort_by=sort_by)
+    if top is not None:
+        rows = rows[:top]
+
+    table = Table(title=f"Ранжирование по {sort_by} (n_trials={mc_trials})")
+    table.add_column("#", justify="right")
+    table.add_column("Команда")
+    table.add_column("Турнир")
+    table.add_column("EV, $", justify="right")
+    table.add_column("EV, %", justify="right")
+    table.add_column("EV/$ риска", justify="right")
+    table.add_column("P(профит) MC", justify="right")
+    table.add_column("Sharpe", justify="right")
+
+    for i, row in enumerate(rows, start=1):
+        sharpe_str = f"{row['sharpe']:.3f}" if row["sharpe"] is not None else "—"
+        table.add_row(
+            str(i),
+            row["team"],
+            row["tournament"],
+            f"{row['ev']:+.2f}",
+            f"{row['ev_pct']:+.2f}%",
+            f"{row['ev_per_dollar_risk']:+.4f}",
+            f"{row['mc_prob_profit'] * 100:.2f}%",
+            sharpe_str,
+        )
+
+    console.print(table)
+
+    if failures:
+        warn_table = Table(title="Пропущено (ошибки конфигурации)")
+        warn_table.add_column("Файл")
+        warn_table.add_column("Причина")
+        for path, message in failures:
+            warn_table.add_row(str(path), message)
+        warn_console.print(warn_table)
 
 
 if __name__ == "__main__":

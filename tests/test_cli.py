@@ -9,6 +9,76 @@ from evhedge.cli import main
 EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "examples" / "football_example.yaml"
 
 
+_RANK_CONFIG_TEMPLATE = """\
+team: "{team}"
+sport: football
+tournament: "Test Cup"
+stages:
+  - name: "Final"
+    win_prob: {win_prob}
+market:
+  no_price: {no_price}
+strategy:
+  name: "none"
+  no_stake_usd: 100
+  hedge_mode: none
+"""
+
+
+def _write_rank_config(dir_path, filename, team, win_prob, no_price):
+    (dir_path / filename).write_text(
+        _RANK_CONFIG_TEMPLATE.format(team=team, win_prob=win_prob, no_price=no_price),
+        encoding="utf-8",
+    )
+
+
+def test_rank_command_prints_ordered_table(tmp_path):
+    _write_rank_config(tmp_path, "team_a.yaml", "TeamA", win_prob=0.30, no_price=0.95)
+    _write_rank_config(tmp_path, "team_b.yaml", "TeamB", win_prob=0.10, no_price=0.97)
+    _write_rank_config(tmp_path, "team_c.yaml", "TeamC", win_prob=0.02, no_price=0.99)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["rank", str(tmp_path), "--mc", "1000", "--seed", "7"])
+
+    assert result.exit_code == 0
+    assert "TeamA" in result.output
+    assert "TeamB" in result.output
+    assert "TeamC" in result.output
+    # Expected order (best EV first, see test_ranking.py for the math):
+    # TeamC, TeamB, TeamA -- so their positions in the raw output text
+    # should appear in that order.
+    pos_c = result.output.index("TeamC")
+    pos_b = result.output.index("TeamB")
+    pos_a = result.output.index("TeamA")
+    assert pos_c < pos_b < pos_a
+
+
+def test_rank_command_reports_broken_configs_without_failing(tmp_path):
+    _write_rank_config(tmp_path, "good.yaml", "TeamA", win_prob=0.3, no_price=0.95)
+    (tmp_path / "broken.yaml").write_text("team: [unclosed", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["rank", str(tmp_path), "--mc", "500"])
+
+    assert result.exit_code == 0
+    assert "TeamA" in result.output
+    # The full path (including "broken.yaml") may be truncated by rich's
+    # column width, so check for the error message text instead, which
+    # confirms the failure was surfaced rather than silently dropped.
+    assert "Пропущено" in result.output
+    assert "не удалось распарсить YAML" in result.output
+
+
+def test_rank_command_all_configs_broken_gives_clean_error(tmp_path):
+    (tmp_path / "broken.yaml").write_text("team: [unclosed", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["rank", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+
+
 def test_ev_command_prints_expected_value():
     runner = CliRunner()
     result = runner.invoke(main, ["ev", str(EXAMPLE_PATH)])
