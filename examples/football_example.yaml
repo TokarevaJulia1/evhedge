@@ -1,0 +1,30 @@
+team: "Team X"
+sport: football
+tournament: "Some Cup 2027"
+
+stages:
+  - name: "1/8 финала"
+    win_prob: 0.65
+    hedge_decimal_odds: 2.1
+  - name: "1/4 финала"
+    win_prob: 0.55
+    hedge_decimal_odds: null
+  - name: "1/2 финала"
+    win_prob: 0.50
+    hedge_decimal_odds: 1.9
+  - name: "Финал"
+    win_prob: 0.45
+    hedge_decimal_odds: 2.6
+
+market:
+  no_price: 0.91
+  yes_price: 0.09     # опционально, можно не указывать -- по умолчанию 1 - no_price
+
+strategy:
+  name: "reinvest base20 kelly0.5"
+  no_stake_usd: 1000
+  bankroll: null       # опционально; если null/не указано -> = no_stake_usd
+  hedge_mode: reinvest
+  hedge_base_stake: 20
+  kelly_fraction: 0.5
+  max_hedge_stake: 200
