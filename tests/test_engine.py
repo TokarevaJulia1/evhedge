@@ -20,7 +20,12 @@ def test_ev_two_stage_no_hedge():
 
     EV = 0.7 * 11.111... + 0.3 * (-100) = -22.222...
     """
-    bracket = Bracket("TeamA", "football", [Stage("R1", 0.6), Stage("R2", 0.5)])
+    bracket = Bracket(
+        team="TeamA",
+        tournament="Test Cup",
+        sport="football",
+        stages=[Stage("R1", 0.6), Stage("R2", 0.5)],
+    )
     market = MarketPrices(no_price=0.9, yes_price=0.1)
     strategy = StrategyConfig("none", no_stake_usd=100.0, hedge_mode="none")
 
@@ -51,9 +56,10 @@ def test_ev_two_stage_fixed_hedge():
     profit(win)= net_no_loss + h1*(d1-1) + h2*(d2-1)  = -85
     """
     bracket = Bracket(
-        "TeamB",
-        "football",
-        [Stage("R1", 0.6, hedge_decimal_odds=2.0), Stage("R2", 0.5, hedge_decimal_odds=1.5)],
+        team="TeamB",
+        tournament="Test Cup",
+        sport="football",
+        stages=[Stage("R1", 0.6, hedge_decimal_odds=2.0), Stage("R2", 0.5, hedge_decimal_odds=1.5)],
     )
     market = MarketPrices(no_price=0.9, yes_price=0.1)
     strategy = StrategyConfig("fixed10", no_stake_usd=100.0, hedge_mode="fixed", hedge_base_stake=10.0)
@@ -71,7 +77,12 @@ def test_ev_two_stage_fixed_hedge():
 def test_ev_hedge_skipped_without_odds():
     """Stages without hedge_decimal_odds never get a hedge stake, even in
     'fixed' mode."""
-    bracket = Bracket("TeamC", "golf", [Stage("Cut", 0.7), Stage("Top20", 0.4)])
+    bracket = Bracket(
+        team="TeamC",
+        tournament="Test Major",
+        sport="golf",
+        stages=[Stage("Cut", 0.7), Stage("Top20", 0.4)],
+    )
     market = MarketPrices(no_price=0.85, yes_price=0.15)
     strategy = StrategyConfig("fixed", no_stake_usd=50.0, hedge_mode="fixed", hedge_base_stake=25.0)
 

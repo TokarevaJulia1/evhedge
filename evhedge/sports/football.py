@@ -90,7 +90,8 @@ def knockout_bracket(
     Args:
         team: Team name.
         tournament: Tournament/edition label, e.g. "Some Cup 2027" — free
-            text, stored as ``Bracket.sport``.
+            text, stored as ``Bracket.tournament``. ``Bracket.sport`` is
+            set to the fixed string ``"football"``.
         stage_names: Ordered stage labels, e.g.
             ``["Группа", "1/8 финала", "1/4 финала", "1/2 финала", "Финал"]``.
         stage_probs: Conditional win/advance probability per stage, same
@@ -133,4 +134,4 @@ def knockout_bracket(
         for name, prob, odds in zip(stage_names, stage_probs, odds_per_stage)
     ]
 
-    return Bracket(team=team, sport=tournament, stages=stages)
+    return Bracket(team=team, tournament=tournament, sport="football", stages=stages)

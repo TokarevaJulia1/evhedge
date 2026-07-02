@@ -18,7 +18,8 @@ def test_knockout_bracket_builds_and_title_prob_is_product():
     bracket = knockout_bracket("Team X", "Some Cup 2027", stage_names, stage_probs)
 
     assert bracket.team == "Team X"
-    assert bracket.sport == "Some Cup 2027"
+    assert bracket.tournament == "Some Cup 2027"
+    assert bracket.sport == "football"
     assert len(bracket.stages) == 4
     assert [s.name for s in bracket.stages] == stage_names
     assert [s.win_prob for s in bracket.stages] == stage_probs

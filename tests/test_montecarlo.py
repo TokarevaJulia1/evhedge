@@ -13,9 +13,10 @@ REL_TOL = 0.05
 
 def _no_hedge_setup():
     bracket = Bracket(
-        "TeamA",
-        "football",
-        [Stage("R1", 0.6), Stage("R2", 0.5), Stage("QF", 0.55)],
+        team="TeamA",
+        tournament="Test Cup",
+        sport="football",
+        stages=[Stage("R1", 0.6), Stage("R2", 0.5), Stage("QF", 0.55)],
     )
     market = MarketPrices(no_price=0.9, yes_price=0.1)
     strategy = StrategyConfig("none", no_stake_usd=100.0, hedge_mode="none")
@@ -24,9 +25,10 @@ def _no_hedge_setup():
 
 def _fixed_hedge_setup():
     bracket = Bracket(
-        "TeamB",
-        "football",
-        [
+        team="TeamB",
+        tournament="Test Cup",
+        sport="football",
+        stages=[
             Stage("R1", 0.6, hedge_decimal_odds=2.0),
             Stage("R2", 0.5, hedge_decimal_odds=1.5),
             Stage("QF", 0.55, hedge_decimal_odds=1.8),

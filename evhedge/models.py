@@ -53,27 +53,23 @@ class Bracket:
 
     Attributes:
         team: Team or player name.
-        sport: Sport/competition identifier, e.g. "football", "tennis".
+        tournament: Specific tournament/edition label, e.g. "Some Cup 2027",
+            "FIFA World Cup 2026". Distinct from ``sport`` below.
+        sport: Sport/competition-type identifier, e.g. "football", "tennis",
+            "golf", "esports" — meant for grouping/branching (CLI, ranking),
+            NOT the name of a specific tournament.
         stages: Ordered list of stages from the team's next match through
             the final. Order matters — ``stages[0]`` is resolved first.
-        outright_decimal_odds: Optional sportsbook decimal odds for the
-            team to win the whole tournament, kept for reference/sanity
-            checks against the implied probability of ``stages``.
     """
 
     team: str
+    tournament: str
     sport: str
     stages: list[Stage] = field(default_factory=list)
-    outright_decimal_odds: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not self.stages:
             raise ValueError(f"Bracket({self.team!r}) must have at least one stage")
-        if self.outright_decimal_odds is not None and self.outright_decimal_odds <= 1.0:
-            raise ValueError(
-                f"Bracket({self.team!r}).outright_decimal_odds must be > 1.0, "
-                f"got {self.outright_decimal_odds}"
-            )
 
     @property
     def title_prob(self) -> float:
