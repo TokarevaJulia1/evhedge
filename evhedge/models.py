@@ -75,6 +75,15 @@ class Bracket:
                 f"got {self.outright_decimal_odds}"
             )
 
+    @property
+    def title_prob(self) -> float:
+        """Probability of winning the whole tournament: the product of
+        every stage's conditional ``win_prob``."""
+        result = 1.0
+        for stage in self.stages:
+            result *= stage.win_prob
+        return result
+
 
 @dataclass
 class MarketPrices:
