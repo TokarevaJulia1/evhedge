@@ -111,7 +111,7 @@ class MarketPrices:
 
 
 #: Valid values for ``StrategyConfig.hedge_mode``.
-HEDGE_MODES = ("none", "fixed", "proportional", "reinvest", "kelly")
+HEDGE_MODES = ("none", "fixed", "proportional", "reinvest", "kelly", "lock_in")
 
 
 @dataclass
@@ -145,17 +145,35 @@ class StrategyConfig:
               ``f* = (win_prob * odds - 1) / (odds - 1)``,
               ``h_r = clip(bankroll * f* * kelly_fraction, 0,
               max_hedge_stake)``, using ``bankroll`` above.
+            - "lock_in": stake the entire "guaranteed reserve" -- what the
+              NO position plus hedge winnings so far would pay out if the
+              team were eliminated right now -- back into the hedge on
+              every stage: ``h_r = locked_value_r * kelly_fraction``, where
+              ``locked_value_r = net_no_win + sum_{i<r} h_i * (d_i - 1)``.
+              At ``kelly_fraction=1.0`` this makes elimination at *any*
+              stage pay exactly $0 (proven in
+              ``tests/test_strategies.py::test_lock_in_zero_floor_algebraic``);
+              it does NOT protect against the team actually winning the
+              whole tournament -- that outcome still loses the NO stake,
+              only partially offset by the compounded hedge winnings (it
+              is not automatically catastrophic, but is not protected the
+              way elimination is either). See
+              ``evhedge.strategies.compute_hedge_plan`` for the exact
+              formula and the ``max_hedge_stake`` caveat.
         hedge_base_stake: Base stake parameter, interpreted per
             ``hedge_mode`` as described above. Must be >= 0.
-        kelly_fraction: Fraction of full Kelly stake ("kelly" mode) or
-            reinvested share of accumulated hedge profit ("reinvest"
-            mode). Must be > 0. Defaults to 0.5 (half-Kelly): full Kelly
-            (1.0) maximizes theoretical long-run growth but is highly
-            sensitive to errors in the win-probability estimates ``p_r``,
-            which are our own model output, not a market-quoted price —
-            so they carry estimation error. Taking on that extra risk
-            should be an explicit choice (pass ``kelly_fraction=1.0``),
-            not the default.
+        kelly_fraction: Meaning depends on ``hedge_mode``: fraction of full
+            Kelly stake ("kelly" mode), reinvested share of accumulated
+            hedge profit ("reinvest" mode), or share of the guaranteed
+            reserve staked back into the hedge ("lock_in" mode) -- all are
+            "what fraction of X gets committed" in spirit, but X differs
+            per mode; check ``compute_hedge_plan`` if in doubt. Must be > 0.
+            Defaults to 0.5 (half-Kelly): full Kelly (1.0) maximizes
+            theoretical long-run growth but is highly sensitive to errors
+            in the win-probability estimates ``p_r``, which are our own
+            model output, not a market-quoted price — so they carry
+            estimation error. Taking on that extra risk should be an
+            explicit choice (pass ``kelly_fraction=1.0``), not the default.
         max_hedge_stake: Optional USD cap applied to every computed hedge
             stake, regardless of mode. Must be > 0 if set.
     """

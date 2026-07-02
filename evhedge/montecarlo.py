@@ -51,7 +51,7 @@ def simulate(
 
     # Hedge sizing is deterministic by stage index (the path leading up to
     # stage r is unique), so it's computed once, not per trial.
-    hedge_stakes = compute_hedge_plan(stages, strategy)
+    hedge_stakes = compute_hedge_plan(stages, strategy, market)
 
     net_no_win = strategy.no_stake_usd * (1 - market.no_price) / market.no_price
     net_no_loss = -strategy.no_stake_usd

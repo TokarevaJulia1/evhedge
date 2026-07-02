@@ -44,7 +44,10 @@
   `(stages, strategy)`, затем `(stages, strategy, market)` (когда
   `no_stake_usd`/`bankroll` временно жили в `MarketPrices`), и в итоге
   вернулся к `(stages, strategy)` после переноса этих полей обратно в
-  `StrategyConfig`.
+  `StrategyConfig`. Позже `market` добавлен обратно в четвёртый раз — на
+  этот раз осознанно и навсегда: режиму `hedge_mode="lock_in"` реально
+  нужна `market.no_price` для расчёта `net_no_win` на первом шаге, а не
+  по ошибке, как в предыдущих итерациях.
 
 ### Пока не реализовано
 - `evhedge/montecarlo.py`, `evhedge/ranking.py`, `evhedge/config_io.py`,

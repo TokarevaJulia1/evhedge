@@ -50,7 +50,7 @@ def compute_ev(bracket: Bracket, market: MarketPrices, strategy: StrategyConfig)
         variance/std dev.
     """
     stages = bracket.stages
-    hedge_stakes = compute_hedge_plan(stages, strategy)
+    hedge_stakes = compute_hedge_plan(stages, strategy, market)
 
     net_no_win = strategy.no_stake_usd * (1 - market.no_price) / market.no_price
     net_no_loss = -strategy.no_stake_usd
