@@ -291,3 +291,82 @@ def test_check_command_missing_file_gives_clean_error():
 
     assert result.exit_code != 0
     assert "Traceback" not in result.output
+
+
+# --- snapshot / resolve / scan --db (Заход 2) -----------------------------------
+
+def test_snapshot_command_records_board(tmp_path):
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, ["snapshot", str(WC2026_PATH), "--db", str(db)])
+
+    assert result.exit_code == 0
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        rows = store.snapshots("FIFA World Cup 2026")
+        # 4 no_prices + 4 leg_prices in the example
+        assert len(rows) == 8
+        legs = [r for r in rows if r.market == "leg"]
+        assert len(legs) == 4
+        assert all(r.source == "board" for r in rows)
+
+
+def test_scan_with_db_computes_velocity_hype_and_records_run(tmp_path):
+    from datetime import timedelta
+
+    from evhedge.storage import PriceSnapshot, Storage, utcnow
+
+    db = tmp_path / "e.db"
+    # Seed: an hour ago Norway's winner-NO stood at 97.0; the config says
+    # 95.3 now -> velocity ~ -1.7 pp/h -> computed HYPE.
+    with Storage(db) as store:
+        store.record_snapshot(PriceSnapshot(
+            tournament="FIFA World Cup 2026", team="Norway", market="winner_no",
+            price_pct=97.0, source="board", ts_utc=utcnow() - timedelta(hours=1),
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["scan", str(WC2026_PATH), "--db", str(db)])
+
+    assert result.exit_code == 0
+    assert "HYPE(v)" in result.output   # Norway, computed from velocity
+    assert "HYPE(m)" in result.output   # Morocco, manual fallback (no history)
+    assert "run #" in result.output
+
+    with Storage(db) as store:
+        run = store.latest_run("FIFA World Cup 2026")
+        assert run is not None
+        passports = store.passports(run.id)
+        assert {p.team for p in passports} == set(WC2026_CANDIDATES)
+        norway = next(p for p in passports if p.team == "Norway")
+        assert norway.report["hype_source"] == "computed"
+        # this scan's board snapshot landed too (velocity's freshest point)
+        assert len(store.snapshots("FIFA World Cup 2026", team="Norway", market="winner_no")) == 2
+
+
+def test_scan_without_db_stays_stateless():
+    runner = CliRunner()
+    result = runner.invoke(main, ["scan", str(WC2026_PATH)])
+
+    assert result.exit_code == 0
+    assert "HYPE(m)" in result.output   # manual fallback only
+    assert "HYPE(v)" not in result.output
+    assert "run #" not in result.output
+
+
+def test_resolve_command_round_trip(tmp_path):
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "resolve", "FIFA World Cup 2026", "Morocco", "reach_final_yes", "no",
+        "--note", "eliminated in QF", "--db", str(db),
+    ])
+
+    assert result.exit_code == 0
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        (resolve,) = store.resolves("FIFA World Cup 2026", team="Morocco")
+        assert resolve.outcome == "no"
+        assert resolve.note == "eliminated in QF"

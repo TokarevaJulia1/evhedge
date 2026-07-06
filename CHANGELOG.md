@@ -27,6 +27,20 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- CLI-обвязка storage (Заход 2, шаг 5):
+  - `evhedge snapshot CONFIG.yaml [--db PATH]` — записать цены доски
+    конфига (no_prices + leg_prices) в БД снапшотов;
+  - `evhedge scan ... --db PATH` — при указании БД: снапшот доски
+    записывается ПЕРВЫМ (окно velocity получает свежую точку), hype
+    считается из истории цен (в колонке «Флаги» — `HYPE(v)` вычисленный /
+    `HYPE(m)` ручной фолбэк), после скана в БД ложатся паспорта рана;
+    без `--db` поведение прежнее, полностью stateless;
+  - `evhedge resolve TOURNAMENT TEAM MARKET yes|no [--note] [--db]` —
+    записать резолюцию рынка (рынка, не нашей позиции).
+  - `storage.board_snapshots(config)` / `no_market_label(target_market)`
+    — построение снапшотов из scanner-конфига (duck-typed, storage не
+    импортирует scanner); одна метка для записи и чтения, чтобы запись и
+    velocity-lookup не разъехались.
 - Hype v2 (Заход 2, шаг 4) — апгрейд с ручного `recent_upset` на
   вычисляемую скорость цены:
   - `storage.price_velocity(tournament, team, market, window, now=)` —

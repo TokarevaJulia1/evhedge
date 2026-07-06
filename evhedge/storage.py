@@ -102,6 +102,41 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def no_market_label(target_market: str) -> str:
+    """Snapshot market label for a scanner config's NO prices:
+    "winner" -> "winner_no", "reach_final" -> "reach_final_no". Keep
+    writes and velocity lookups on this one function so they can't drift
+    apart."""
+    return f"{target_market}_no"
+
+
+def board_snapshots(config, ts_utc: Optional[datetime] = None) -> list[PriceSnapshot]:
+    """Board-source snapshots of everything a scanner config quotes:
+    one per ``no_prices`` entry (market per ``no_market_label``) and one
+    per ``leg_prices`` entry (market "leg", counterparty set).
+
+    ``config`` is duck-typed (needs ``tournament``, ``target_market``,
+    ``no_prices``, ``leg_prices``) so storage stays import-free of
+    scanner. All snapshots share one timestamp -- they're one observation
+    of one board.
+    """
+    ts = ts_utc or utcnow()
+    market = no_market_label(config.target_market)
+    snaps = [
+        PriceSnapshot(
+            tournament=config.tournament, team=team, market=market,
+            price_pct=price, source="board", ts_utc=ts,
+        )
+        for team, price in config.no_prices.items()
+    ]
+    for (team_a, team_b), ask_pct in config.leg_prices.items():
+        snaps.append(PriceSnapshot(
+            tournament=config.tournament, team=team_a, market="leg",
+            price_pct=ask_pct, source="board", ts_utc=ts, counterparty=team_b,
+        ))
+    return snaps
+
+
 @dataclass
 class Resolve:
     """How one market actually resolved.

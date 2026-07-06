@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +39,21 @@ from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.engine import compute_ev
 from evhedge.montecarlo import plot_distribution, simulate
 from evhedge.ranking import load_configs_from_dir, rank_teams
-from evhedge.scanner import ScannerError, load_scanner_config, scan, sort_candidates
+from evhedge.scanner import (
+    HYPE_VELOCITY_WINDOW_HOURS,
+    ScannerError,
+    load_scanner_config,
+    scan,
+    sort_candidates,
+)
+from evhedge.storage import (
+    Resolve,
+    Storage,
+    StorageError,
+    board_snapshots,
+    no_market_label,
+    utcnow,
+)
 
 console = Console(width=120)
 error_console = Console(width=120, stderr=True, style="bold red")
@@ -323,14 +338,57 @@ def _fmt_liquidity(liq) -> str:
     "config's outright_threshold_pct stays the UPPER bound).",
 )
 @click.option("--top", type=int, default=None, help="Only show the top K rows.")
-def scan_command(config: Path, min_outright: Optional[float], top: Optional[int]) -> None:
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Snapshot DB: record this board + the scan's passports, and "
+    "compute the HYPE flag from price velocity history (without --db the "
+    "manual recent_upset fallback applies).",
+)
+def scan_command(
+    config: Path, min_outright: Optional[float], top: Optional[int], db_path: Optional[Path]
+) -> None:
     """Scan CONFIG.yaml (scanner format) for long-shot bracket candidates."""
     try:
         scanner_config = load_scanner_config(config)
-        reports = scan(scanner_config)
     except (ConfigError, ScannerError) as e:
         error_console.print(f"Ошибка: {e}")
         sys.exit(1)
+
+    store: Optional[Storage] = None
+    velocities: Optional[dict[str, float]] = None
+    try:
+        if db_path is not None:
+            store = Storage(db_path)
+            # Record today's board FIRST so the velocity window includes
+            # the freshest point.
+            store.record_snapshots(board_snapshots(scanner_config))
+            market_label = no_market_label(scanner_config.target_market)
+            window = timedelta(hours=HYPE_VELOCITY_WINDOW_HOURS)
+            velocities = {}
+            for team in scanner_config.no_prices:
+                v = store.price_velocity(
+                    scanner_config.tournament, team, market_label, window
+                )
+                if v is not None:
+                    velocities[team] = v
+
+        reports = scan(scanner_config, no_velocities_pp_per_hour=velocities)
+
+        if store is not None:
+            run_id = store.record_scan(
+                scanner_config.tournament, scanner_config.target_market,
+                reports, config_path=str(config),
+            )
+            console.print(f"БД {db_path}: снапшоты доски + паспорта записаны (run #{run_id})")
+    except (ScannerError, StorageError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+    finally:
+        if store is not None:
+            store.close()
 
     if min_outright is not None:
         reports = [r for r in reports if scanner_config.teams[r.team] >= min_outright]
@@ -360,7 +418,7 @@ def scan_command(config: Path, min_outright: Optional[float], top: Optional[int]
         if r.leg_profile_flag:
             flags.append("FAV")
         if r.hype_flag:
-            flags.append("HYPE")
+            flags.append("HYPE(v)" if r.hype_source == "computed" else "HYPE(m)")
         src = r.sources_breakdown
         table.add_row(
             str(i),
@@ -426,6 +484,69 @@ def book_command(token_id: str, side: str, depth_to: Optional[float]) -> None:
             warn_console.print(f"Исполнимо ({side} до {depth_to}): ничего (пустая книга/вне лимита)")
         else:
             console.print(f"Исполнимо ({side} до {depth_to}): ${usd:.2f} @ {avg_price:.4f} средняя")
+
+
+@main.command("snapshot")
+@click.argument("config", type=click.Path(path_type=Path))
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=Path("evhedge.db"),
+    show_default=True,
+    help="Snapshot DB file (created if missing).",
+)
+def snapshot_command(config: Path, db_path: Path) -> None:
+    """Record CONFIG.yaml's board prices (no_prices + leg_prices) into the DB."""
+    try:
+        scanner_config = load_scanner_config(config)
+    except (ConfigError, ScannerError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    try:
+        snaps = board_snapshots(scanner_config)
+        with Storage(db_path) as store:
+            store.record_snapshots(snaps)
+    except StorageError as e:
+        error_console.print(f"Ошибка БД: {e}")
+        sys.exit(1)
+
+    console.print(
+        f"Записано снапшотов: {len(snaps)} ({scanner_config.tournament}) -> {db_path}"
+    )
+
+
+@main.command("resolve")
+@click.argument("tournament")
+@click.argument("team")
+@click.argument("market")
+@click.argument("outcome", type=click.Choice(["yes", "no"]))
+@click.option("--note", default=None, help="Free-text note, e.g. how the elimination went.")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=Path("evhedge.db"),
+    show_default=True,
+    help="Snapshot DB file.",
+)
+def resolve_command(
+    tournament: str, team: str, market: str, outcome: str, note: Optional[str], db_path: Path
+) -> None:
+    """Record how TEAM's MARKET resolved: the MARKET's outcome (yes|no),
+    not our position's (a NO position wins on "no")."""
+    try:
+        with Storage(db_path) as store:
+            store.record_resolve(Resolve(
+                tournament=tournament, team=team, market=market,
+                outcome=outcome, ts_utc=utcnow(), note=note,
+            ))
+    except StorageError as e:
+        error_console.print(f"Ошибка БД: {e}")
+        sys.exit(1)
+
+    console.print(f"Резолв записан: {tournament} / {team} / {market} = {outcome}")
 
 
 @main.command("check")
