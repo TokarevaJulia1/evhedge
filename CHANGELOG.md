@@ -27,6 +27,26 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- `evhedge/consistency.py` (Модуль 5) — board-level проверки внутренней
+  согласованности цен доски (данные Модуля 1), сегодняшние находки как
+  класс сигнала. Каждый результат несёт обязательное поле
+  `caveat = VERIFY_BOOK_CAVEAT` («verify book before trading») — caveat
+  является частью данных, а не документацией, по PROJECT RULE из
+  `data_sources/polymarket.py`. Три проверки:
+  - `basket_check(markets, slots)` — корзина NO-асков доски с
+    фиксированным числом слотов против гарантированной выплаты
+    `(n - slots) * 100` (находка «+1.2% корзина»);
+  - `identity_check(parent_market, member_markets)` — агрегатный рынок
+    должен стоить как сумма взаимоисключающих членов, маппинг членов —
+    руками в конфиге, автовывода нет намеренно (находка «CONCACAF=USA
+    +0.6%»); DESIGN CHOICE: `IDENTITY_MIN_EDGE_PCT = 0.5` — зазор ниже
+    полупункта не отличим от несвежей витрины и спреда;
+  - `vertical_check(team, ladder)` — цепочка reach_X цен команды
+    монотонна по глубине, условные `p_cond` правдоподобны: `p_cond >= 1`
+    — жёсткое нарушение (сигнал), экстремум — мягкий флаг; DESIGN CHOICE:
+    границы экстремумов `VERTICAL_EXTREME_LOW/HIGH = 0.05/0.95`.
+  `tests/test_consistency.py` — фикстуры воспроизводят числа реальных
+  находок (+1.2%, +0.6%).
 - Каркас проекта: `pyproject.toml` (Python >=3.10, зависимости numpy,
   pyyaml, click, rich, matplotlib, httpx), `requirements.txt`, `README.md`,
   структура директорий `evhedge/`, `evhedge/sports/`,
