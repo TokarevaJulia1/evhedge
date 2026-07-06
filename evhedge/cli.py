@@ -27,6 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
+from evhedge.collect import CollectError, collect_board, collect_match_markets
 from evhedge.config_io import ConfigError, load_full_config
 from evhedge.consistency import (
     VERIFY_BOOK_CAVEAT,
@@ -515,6 +516,90 @@ def snapshot_command(config: Path, db_path: Path) -> None:
     console.print(
         f"Записано снапшотов: {len(snaps)} ({scanner_config.tournament}) -> {db_path}"
     )
+
+
+@main.command("pull")
+@click.option("--tournament", required=True, help="Tournament label to record under.")
+@click.option(
+    "--board",
+    "boards",
+    multiple=True,
+    help="EVENT_SLUG:LABEL — snapshot a Yes/No-per-team Gamma event under "
+    "market label LABEL (e.g. ewc-dota-2-winner-2026...:winner). Repeatable.",
+)
+@click.option(
+    "--matches",
+    "matches_spec",
+    default=None,
+    help='TAG:TITLE_FILTER — walk match events under Gamma TAG whose title '
+    'contains TITLE_FILTER: open series -> leg snapshots, closed games -> '
+    'resolves (e.g. "dota-2:Esports World Cup").',
+)
+@click.option(
+    "--matches-since",
+    "matches_since",
+    default=None,
+    help="ISO date filter for --matches (e.g. 2026-07-01). Practically "
+    "required on busy tags: Gamma 422s deep pagination over settled events.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=Path("evhedge.db"),
+    show_default=True,
+    help="Snapshot DB file (created if missing).",
+)
+def pull_command(
+    tournament: str,
+    boards: tuple[str, ...],
+    matches_spec: Optional[str],
+    matches_since: Optional[str],
+    db_path: Path,
+) -> None:
+    """Collect live Gamma board prices and match results into the DB."""
+    if not boards and matches_spec is None:
+        raise click.UsageError("нужно хотя бы одно из --board / --matches")
+
+    parsed_boards = []
+    for spec in boards:
+        slug, sep, label = spec.partition(":")
+        if not sep or not slug or not label:
+            raise click.UsageError(f"--board ожидает EVENT_SLUG:LABEL, получено {spec!r}")
+        parsed_boards.append((slug, label))
+    if matches_spec is not None:
+        tag, sep, title_filter = matches_spec.partition(":")
+        if not sep or not tag or not title_filter:
+            raise click.UsageError(f"--matches ожидает TAG:TITLE_FILTER, получено {matches_spec!r}")
+
+    summaries = []
+    try:
+        with Storage(db_path) as store:
+            for slug, label in parsed_boards:
+                summaries.append(collect_board(store, tournament, slug, label))
+            if matches_spec is not None:
+                summaries.append(collect_match_markets(
+                    store, tournament, tag, title_filter, start_date_min=matches_since,
+                ))
+    except (CollectError, PolymarketAPIError, StorageError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    table = Table(title=f"pull — {tournament} -> {db_path}")
+    table.add_column("Источник")
+    table.add_column("Рынков", justify="right")
+    table.add_column("Снапшотов", justify="right")
+    table.add_column("Резолвов", justify="right")
+    table.add_column("Пропущено (плейсх./форма/нерешено/цена)", justify="right")
+    for s in summaries:
+        table.add_row(
+            "; ".join(s.labels),
+            str(s.markets_seen),
+            str(s.snapshots_written),
+            str(s.resolves_written),
+            f"{s.skipped_placeholders}/{s.skipped_shape}/{s.skipped_unresolved}/{s.skipped_price_range}",
+        )
+    console.print(table)
 
 
 @main.command("resolve")

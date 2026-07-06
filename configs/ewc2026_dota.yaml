@@ -1,0 +1,60 @@
+# EWC 2026 Dota 2 — РАБОЧИЙ конфиг (не пример). Собран 6 июля 2026,
+# за день до старта группового этапа (7 июля).
+#
+# Формат (проверен вручную, источник — регламент турнира):
+#   Stage 1: Group Stage (7-12 июля) — 4 группы по 6 команд, round-robin,
+#            все серии Bo2. 1-е место -> сразу в плей-офф; 2-3-4-е -> в
+#            survival; остальные вылетают.
+#   Stage 2: Survival (14-15 июля) — single-elim гаунтлет: 4-е vs 3-е ->
+#            победитель vs 2-е, всё Bo3. Четыре команды проходят в плей-офф.
+#   Stage 3: Playoffs (16-19 июля) — single-elim, Bo3, гранд-финал Bo5.
+#
+# bracket: null до 12 июля — состав survival/плей-офф неизвестен, сетки
+# нет, scan() кандидатов не даст (и не должен). Заполнить после жеребьёвки:
+# сначала survival-цепочки, с 16 июля — плей-офф сетку.
+#
+# teams: YES-цены доски "EWC Dota 2 Winner" (Polymarket board, 6 июля,
+# volume $35.7k) — витрина, не аски. Плейсхолдеры доски (A-E, Other)
+# исключены. Обновлять через `evhedge pull`, актуальная история — в
+# data/ewc2026.db.
+#
+# no_prices: заполнить book-проверенными NO-асками, когда выберем
+# кандидатов (после появления сетки).
+tournament: "EWC 2026 Dota 2"
+
+stages_meta:
+  - {name: group, type: round_robin, match_format: bo2, hedge_suitable: false}
+  - {name: survival, type: gauntlet, match_format: bo3, hedge_suitable: true}
+  - {name: playoff, type: single_elim, match_format: "bo3 (final bo5)", hedge_suitable: true}
+
+teams:
+  Team Yandex: 22.5
+  Team Falcons: 16.5
+  PARIVISION: 14.0
+  BetBoom Team: 10.5
+  Team Spirit: 9.0
+  Aurora Gaming: 8.5
+  LGD Gaming: 6.5
+  1W: 6.0
+  Team Liquid: 4.05
+  Xtreme Gaming: 3.8
+  OG: 2.5
+  L1GA TEAM: 2.2
+  Vici Gaming: 1.25
+  Virtus.pro: 1.15
+  GamerLegion: 1.15
+  MOUZ: 1.05
+  PlayTime: 1.0
+  Nigma Galaxy: 0.95
+  Team Nemesis: 0.55
+  Rune Eaters: 0.35
+  Level UP: 0.25
+  IC x Insanity: 0.25
+  REKONIX: 0.15
+  Poor Rangers: 0.05
+
+target_market: winner
+
+bracket: null   # см. шапку: заполнить после 12 июля
+
+outright_threshold_pct: 10.0

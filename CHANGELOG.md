@@ -27,6 +27,27 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- `evhedge/collect.py` + `evhedge pull` — автоматический сбор с Gamma в
+  storage (закрывает шов «Gamma-листинг не подключён к CLI»):
+  - `collect_board(store, tournament, event_slug, label)` — Yes/No-доска
+    (аутрайт, региональный агрегат) -> по два снапшота на команду
+    (`<label>_yes`/`<label>_no`, token id на каждой стороне);
+    плейсхолдеры доски определяются ПО ДАННЫМ (нулевой объём и все цены
+    ровно 0.5), а не по списку имён; каждый пропуск посчитан в
+    `CollectSummary`, ничего не выпадает молча.
+  - `collect_match_markets(store, ...)` — матчевые события тега: открытые
+    Match Winner -> `leg`-снапшоты (команда A, counterparty B), закрытые
+    Match/Game N Winner -> по два `Resolve` (yes победителю); закрытый
+    рынок без чистого 1/0 (ничья Bo2) — `skipped_unresolved`, не
+    угадывается. Пропсы (Roshan, First Blood, тоталы) намеренно не
+    собираются.
+  - `fetch_tournament_markets` получил `start_date_min` — найдено вживую:
+    Gamma жёстко режет глубокую пагинацию по закрытым событиям (422 на
+    offset ~2100 на теге dota-2), фильтр по окну турнира обязателен.
+  - `configs/ewc2026_dota.yaml` — рабочий конфиг EWC 2026 Dota 2 (формат
+    сверен: группы round_robin bo2 -> survival гаунтлет bo3 -> плей-офф
+    single_elim bo3/bo5; `bracket: null` до жеребьёвки 12 июля); `data/`
+    и `*.db` в .gitignore — базы не коммитятся.
 - CLI-обвязка storage (Заход 2, шаг 5):
   - `evhedge snapshot CONFIG.yaml [--db PATH]` — записать цены доски
     конфига (no_prices + leg_prices) в БД снапшотов;

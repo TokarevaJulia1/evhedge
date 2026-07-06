@@ -95,13 +95,21 @@ def _get_paginated(url: str, params: dict, page_size: int = PAGE_SIZE) -> list[d
 # Gamma API: event/market listing
 # ---------------------------------------------------------------------------
 
-def fetch_tournament_markets(tag_slug: str, closed: bool = False) -> list[dict]:
+def fetch_tournament_markets(
+    tag_slug: str, closed: bool = False, start_date_min: str | None = None
+) -> list[dict]:
     """Fetch every event for a Gamma ``tag_slug`` (paginated).
 
     Args:
         tag_slug: Gamma tag slug, e.g. "cs2", "league-of-legends".
         closed: False (default) for active/live markets, True for settled
             ones.
+        start_date_min: Optional ISO date(-time) server-side filter,
+            e.g. "2026-07-01T00:00:00Z". PRACTICALLY REQUIRED for
+            ``closed=True`` on a busy tag: Gamma hard-rejects deep
+            pagination (422 at offset ~2100, observed live on "dota-2"),
+            so an unfiltered walk over years of settled events dies
+            mid-listing. Filter to the tournament window instead.
 
     Returns:
         Raw Gamma event dicts, unmodified. Each has (at least) ``slug``,
@@ -115,6 +123,8 @@ def fetch_tournament_markets(tag_slug: str, closed: bool = False) -> list[dict]:
         PolymarketAPIError: On a network/HTTP failure after retries.
     """
     params = {"tag_slug": tag_slug, "closed": "true" if closed else "false"}
+    if start_date_min is not None:
+        params["start_date_min"] = start_date_min
     return _get_paginated(f"{GAMMA_API_URL}/events", params)
 
 
