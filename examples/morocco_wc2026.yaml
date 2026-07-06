@@ -1,0 +1,46 @@
+# Марокко, ЧМ-2026 — ставка "НЕ выйдет в финал"
+# Обновлено 2 июля 2026 на РЕАЛЬНЫХ котировках Polymarket (не выведенных
+# задним числом из другого рынка, как в первой версии этого файла).
+#
+# Турнир уже идёт: Марокко прошли группу (2-е место в группе C) и 1/16
+# финала (обыграли Нидерланды по пенальти 30 июня). Ниже — только
+# ОСТАВШИЕСЯ на сегодня раунды. Финал отдельной Stage не нужен и матч
+# за 3-е место намеренно не включён (не влияет на путь к финалу).
+
+team: "Morocco"
+sport: football
+tournament: "FIFA World Cup 2026"
+
+stages:
+  - name: "1/8 финала (vs Канада, 4 июля)"
+    # Polymarket "Nation To Reach Quarterfinals", live, 2 июля: Yes 72c
+    # (сверено с Kalshi "71c пройти Канаду" — независимое подтверждение)
+    win_prob: 0.72
+    hedge_decimal_odds: null
+  - name: "1/4 финала"
+    # Прямой рыночной цены нет (Polymarket "Reach Semifinals" для Марокко
+    # оказался кэширован от 17 июня, ещё до 1/16 финала — не использую).
+    # Интерполировано из связки: 0.72 (реальная, выше) и 0.076 (реальная,
+    # см. финальную стадию) при сохранении пропорции сложности раундов
+    # из FanDuel (1 июля). ПРИ hedge_mode: none этот сплит не влияет на
+    # итоговый EV — только на разбивку по стадиям в таблице.
+    win_prob: 0.2781
+    hedge_decimal_odds: null
+  - name: "1/2 финала"
+    win_prob: 0.3797   # см. комментарий выше; 0.72*0.2781*0.3797 ≈ 0.076
+    hedge_decimal_odds: null
+
+market:
+  # Polymarket, "Will Morocco reach the 2026 FIFA World Cup final?", live 2 июля:
+  # Купить No 92.5c / Купить Yes 7.6c — реальная рыночная цена, не инверсия.
+  no_price: 0.925
+  yes_price: 0.076
+
+strategy:
+  name: "Morocco NO-to-final, no hedge, Polymarket live 2 Jul 2026"
+  no_stake_usd: 1000
+  bankroll: null
+  hedge_mode: none
+  hedge_base_stake: 0
+  kelly_fraction: 0.5
+  max_hedge_stake: null
