@@ -40,7 +40,23 @@ Stage-type rules
   come from ``leg_prices``; gaps are tagged "no_data" and filled with a
   neutral 0.5 split ONLY so the arithmetic can proceed, never with a model
   estimate -- ``sources_breakdown`` reports exactly how many of them there
-  were, so "no_data" showing up is a visible red flag, not a silent guess.
+  were.
+
+"no_data" gaps and aggregate metrics
+------------------------------------
+A neutral 0.5 point-fill leaks into aggregates (deadness, p_stays_dead,
+the FUEL CHECK multiplier product) and produces a numerically plausible
+passport built on coin flips. So whenever a candidate's path contains at
+least one "no_data" pair, ``scan()`` re-computes those aggregates twice
+more with the gaps filled at ``NO_DATA_FILL_LOW``/``NO_DATA_FILL_HIGH``
+(0.2 / 0.8) and reports each affected metric as a (low, high) RANGE
+alongside the 0.5-point value; if the FUEL CHECK verdict is not the same
+at all three fills, the verdict becomes ``INSUFFICIENT_DATA`` -- the
+candidate must not be ranked alongside data-complete ones (see
+``CandidateReport.data_complete``). The fill is applied to the pair in
+the orientation it is first queried, so the band is a sensitivity stress,
+not a rigorous bound -- an honest "don't know", which beats a plausible
+number.
 """
 
 from __future__ import annotations
@@ -79,6 +95,18 @@ LEG_PRICE_STRESS_PP = 5.0
 #: percentages/ratios, not real position sizing -- 100 makes the EV output
 #: read directly as "dollars per $100 notional", i.e. a percent-like number).
 NOTIONAL_STAKE_USD = 100.0
+
+#: Fill values used to band aggregate metrics when a candidate's path
+#: contains "no_data" pairwise gaps (see module docstring). The 0.5 point
+#: value is still reported as the central estimate; these two produce the
+#: (low, high) range around it.
+NO_DATA_FILL_LOW = 0.2
+NO_DATA_FILL_HIGH = 0.8
+
+#: FUEL CHECK verdict when "no_data" gaps make the verdict flip across the
+#: NO_DATA_FILL_LOW..NO_DATA_FILL_HIGH band -- the data doesn't support a
+#: SOLID/THIN/FAILS call at all.
+INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 
 
 class ScannerError(Exception):
@@ -254,10 +282,20 @@ def candidate_pool(node: BracketNode, team: str, round_no: int) -> set[str]:
 class TournamentModel:
     """Wraps a ``ScannerConfig`` with memoized subtree-winner-distribution
     computation and a running tally of how many pairwise probabilities came
-    from the market vs. the model vs. an unfilled gap."""
+    from the market vs. the model vs. an unfilled gap.
 
-    def __init__(self, config: ScannerConfig):
+    ``no_data_fill`` is the probability substituted for a pairwise gap
+    (neither a leg price nor a model estimate available), applied in the
+    orientation the pair is first queried. 0.5 is the neutral central
+    estimate; ``scan()`` additionally builds models at
+    ``NO_DATA_FILL_LOW``/``NO_DATA_FILL_HIGH`` to band the aggregates
+    (see module docstring)."""
+
+    def __init__(self, config: ScannerConfig, no_data_fill: float = 0.5):
+        if not (0.0 < no_data_fill < 1.0):
+            raise ScannerError(f"no_data_fill must be in (0, 1), got {no_data_fill}")
         self.config = config
+        self.no_data_fill = no_data_fill
         self._dist_cache: dict[int, dict[str, float]] = {}
         self._pair_cache: dict[tuple[str, str], tuple[float, str]] = {}
         self.source_counts: dict[str, int] = {"market": 0, "model": 0, "no_data": 0}
@@ -269,8 +307,8 @@ class TournamentModel:
     def pair_prob_sourced(self, a: str, b: str) -> tuple[float, str]:
         """P(a beats b), tagged with where it came from: 'market'
         (leg_prices), 'model' (power_model, only if enabled), or 'no_data'
-        (neither available -- filled with a neutral 0.5, NOT a model
-        estimate, and counted so the gap is visible)."""
+        (neither available -- filled with ``self.no_data_fill``, NOT a
+        model estimate, and counted so the gap is visible)."""
         key = (a, b)
         if key in self._pair_cache:
             return self._pair_cache[key]
@@ -282,7 +320,7 @@ class TournamentModel:
         elif self.config.power_model_enabled:
             p, src = pair_prob(self._strength(a), self._strength(b)), "model"
         else:
-            p, src = 0.5, "no_data"
+            p, src = self.no_data_fill, "no_data"
 
         self.source_counts[src] += 1
         self._pair_cache[(a, b)] = (p, src)
@@ -543,7 +581,6 @@ def check_liquidity(
 class EconomicsResult:
     ev_lockin: float
     ev_hold: float
-    exit_now: float
     terminal_branch_pnl: float
     sensitivity: dict[str, float]  # scenario label -> ev_lockin under that leg-price shift
 
@@ -571,14 +608,16 @@ def _build_stages_for_path(model: TournamentModel, team: str, depth: int) -> lis
 def compute_economics(
     model: TournamentModel, team: str, depth: int, no_price_pct: float
 ) -> EconomicsResult:
-    """EV of three postures (rolling lock_in hedge / plain NO hold / exit
-    now), plus the terminal (team-wins-it-all) branch and a 3-scenario leg
-    price sensitivity band.
+    """EV of two postures (rolling lock_in hedge / plain NO hold), plus
+    the terminal (team-wins-it-all) branch and a 3-scenario leg price
+    sensitivity band.
 
-    DESIGN CHOICE: "exit_now" is 0.0 by construction -- this module scores
+    There is deliberately NO "exit_now" field: this module scores
     CANDIDATES to enter, not open positions, so there's no cost basis to
-    exit from yet. If this was meant to score an already-open position,
-    that needs a cost-basis input this config doesn't currently carry.
+    value an exit against. A constant 0.0 in the report read as "exiting
+    costs nothing" and invited bogus comparisons with ``ev_hold``.
+    Exit valuation comes back together with position tracking (which
+    carries the cost basis this config doesn't).
     """
     no_price = no_price_pct / 100.0
     market = MarketPrices(no_price=no_price, yes_price=1.0 - no_price)
@@ -616,7 +655,6 @@ def compute_economics(
     return EconomicsResult(
         ev_lockin=lockin_result.expected_value_usd,
         ev_hold=hold_result.expected_value_usd,
-        exit_now=0.0,
         terminal_branch_pnl=terminal_pnl,
         sensitivity=sensitivity,
     )
@@ -632,6 +670,11 @@ class CandidateReport:
     # Liquidity is listed early deliberately -- it gates tradability before
     # any of the path/economics numbers below are worth reading at all.
     liquidity: LiquidityInfo
+    # data_complete is second for the same reason: False means at least one
+    # "no_data" pair leaked into the aggregates below -- read the *_range
+    # bands, not the point values, and don't rank this candidate alongside
+    # data-complete ones.
+    data_complete: bool
     deadness: float
     p_stays_dead: float
     bench_depth: dict[int, tuple[str, float]]
@@ -641,16 +684,20 @@ class CandidateReport:
     premium_pct: float
     required_multiplier: float
     available_multiplier: float
-    fuel_verdict: str
+    fuel_verdict: str  # SOLID | THIN | FAILS | INSUFFICIENT_DATA
     leg_profile_flag: Optional[str]
     hype_flag: Optional[str]
     ev_lockin: float
     ev_hold: float
-    exit_now: float
     terminal_branch_pnl: float
     sensitivity: dict[str, float]
     sources_breakdown: dict[str, int]
     excluded_stages: list[str]
+    # (low, high) bands across the NO_DATA_FILL_LOW..HIGH re-computation;
+    # None when data_complete (the point value is then the whole story).
+    deadness_range: Optional[tuple[float, float]] = None
+    p_stays_dead_range: Optional[tuple[float, float]] = None
+    available_multiplier_range: Optional[tuple[float, float]] = None
 
 
 def scan(
@@ -693,12 +740,39 @@ def scan(
         fuel = fuel_check(model, team, depth, no_price_pct)
         econ = compute_economics(model, team, depth, no_price_pct)
         liquidity = check_liquidity(token_ids.get(team), volumes.get(team), worst_price=no_price_pct / 100.0)
+        dead = deadness(model, team, depth)
+        stays_dead = p_stays_dead(model, team, depth)
+
+        # "no_data" gaps: re-run the 0.5-fill-sensitive aggregates at the
+        # 0.2/0.8 band and, if the FUEL verdict flips anywhere across the
+        # band, refuse to call it at all (see module docstring).
+        data_complete = model.source_counts["no_data"] == 0
+        fuel_verdict = fuel.verdict
+        deadness_range = stays_dead_range = available_range = None
+        if not data_complete:
+            band_models = [
+                TournamentModel(config, no_data_fill=fill)
+                for fill in (NO_DATA_FILL_LOW, NO_DATA_FILL_HIGH)
+            ]
+            band_fuels = [fuel_check(m, team, depth, no_price_pct) for m in band_models]
+            band_dead = [deadness(m, team, depth) for m in band_models]
+            band_stays = [p_stays_dead(m, team, depth) for m in band_models]
+
+            deadness_range = (min([dead, *band_dead]), max([dead, *band_dead]))
+            stays_dead_range = (min([stays_dead, *band_stays]), max([stays_dead, *band_stays]))
+            all_available = [fuel.available_multiplier] + [f.available_multiplier for f in band_fuels]
+            available_range = (min(all_available), max(all_available))
+
+            verdicts = {fuel.verdict} | {f.verdict for f in band_fuels}
+            if len(verdicts) > 1:
+                fuel_verdict = INSUFFICIENT_DATA
 
         reports.append(CandidateReport(
             team=team,
             liquidity=liquidity,
-            deadness=deadness(model, team, depth),
-            p_stays_dead=p_stays_dead(model, team, depth),
+            data_complete=data_complete,
+            deadness=dead,
+            p_stays_dead=stays_dead,
             bench_depth=bench_depth(model, team, depth),
             min_opp_strength=min_opponent_strength(model, team, depth),
             rounds_to_boss=rounds_to_boss(model, team, depth, DEFAULT_BOSS_THRESHOLD_PCT),
@@ -706,16 +780,18 @@ def scan(
             premium_pct=fuel.premium_pct,
             required_multiplier=fuel.required_multiplier,
             available_multiplier=fuel.available_multiplier,
-            fuel_verdict=fuel.verdict,
+            fuel_verdict=fuel_verdict,
             leg_profile_flag=leg_profile_flag(model, team, depth),
             hype_flag=hype_flag(config, team),
             ev_lockin=econ.ev_lockin,
             ev_hold=econ.ev_hold,
-            exit_now=econ.exit_now,
             terminal_branch_pnl=econ.terminal_branch_pnl,
             sensitivity=econ.sensitivity,
             sources_breakdown=dict(model.source_counts),
             excluded_stages=config.excluded_stages,
+            deadness_range=deadness_range,
+            p_stays_dead_range=stays_dead_range,
+            available_multiplier_range=available_range,
         ))
 
     return reports

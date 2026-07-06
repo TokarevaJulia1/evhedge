@@ -298,7 +298,7 @@ def test_compute_economics_returns_all_fields_and_sensitivity_scenarios():
 
     assert isinstance(econ.ev_lockin, float)
     assert isinstance(econ.ev_hold, float)
-    assert econ.exit_now == 0.0
+    assert not hasattr(econ, "exit_now")  # removed until position tracking exists
     assert set(econ.sensitivity) == {"current", "legs_cheaper", "legs_pricier"}
     assert econ.sensitivity["current"] == pytest.approx(econ.ev_lockin)
 
@@ -333,6 +333,72 @@ def test_scan_report_fields_are_populated():
     # strongest" for a pool of size 1, so bench_depth only has an entry for
     # round 2 (candidate pool {TeamC, TeamD}).
     assert set(report.bench_depth) == {2}
+
+
+# --- no_data banding / INSUFFICIENT_DATA --------------------------------------
+
+ROUND_ROBIN_PLUS_PLAYOFF = [
+    StageMeta("group", "round_robin", "bo2", False),
+    StageMeta("playoff", "single_elim", "bo3", True),
+]
+
+
+def test_scan_data_complete_candidate_has_no_ranges():
+    config = _four_team_config()  # power model enabled -> every pair is sourced
+    report = next(r for r in scan(config) if r.team == "TeamB")
+
+    assert report.data_complete is True
+    assert report.sources_breakdown["no_data"] == 0
+    assert report.deadness_range is None
+    assert report.p_stays_dead_range is None
+    assert report.available_multiplier_range is None
+
+
+def test_scan_no_data_candidate_gets_ranges_and_insufficient_data_verdict():
+    # round_robin stage disables the power model; no leg prices -> every
+    # pairwise probability on TeamB's path is a "no_data" gap.
+    config = _four_team_config(stages_meta=ROUND_ROBIN_PLUS_PLAYOFF)
+    report = next(r for r in scan(config) if r.team == "TeamB")
+
+    assert report.data_complete is False
+    assert report.sources_breakdown["no_data"] > 0
+
+    # Every banded metric must come back as a (low, high) range containing
+    # the 0.5-fill point value.
+    for point, rng in (
+        (report.deadness, report.deadness_range),
+        (report.p_stays_dead, report.p_stays_dead_range),
+        (report.available_multiplier, report.available_multiplier_range),
+    ):
+        assert rng is not None
+        low, high = rng
+        assert low <= point <= high
+
+    # available_multiplier genuinely moves across the 0.2/0.8 band (the legs
+    # are pure coin flips), so the range must be strictly wider than a point.
+    low, high = report.available_multiplier_range
+    assert high > low
+
+    # no_price=91 -> required ~10.1; available swings from ~1.6 (fill=0.8)
+    # to ~25 (fill=0.2), i.e. FAILS at one end and SOLID at the other -- the
+    # verdict must refuse to pick a side.
+    assert report.fuel_verdict == "INSUFFICIENT_DATA"
+
+
+def test_scan_no_data_verdict_kept_when_band_agrees():
+    # Same no_data gaps, but a NO price so cheap (premium so large) that the
+    # hedge economics clear even at the pessimistic end of the band: for a
+    # 2-round path, required = 40/60 ~ 0.67 while available >= 1.25^2 ~ 1.56
+    # even at fill=0.8 -> SOLID at every fill -> verdict survives, with the
+    # range still reported.
+    config = _four_team_config(
+        stages_meta=ROUND_ROBIN_PLUS_PLAYOFF, no_prices={"TeamB": 40.0}
+    )
+    report = next(r for r in scan(config) if r.team == "TeamB")
+
+    assert report.data_complete is False
+    assert report.fuel_verdict == "SOLID"
+    assert report.available_multiplier_range is not None
 
 
 # --- YAML loading --------------------------------------------------------------
