@@ -27,8 +27,9 @@ conventions used across the project so velocity lookups match writes:
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Union
@@ -98,6 +99,47 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@dataclass
+class ScanRun:
+    """One recorded ``scanner.scan()`` invocation. A run with zero
+    passports is still recorded -- "the scan found nothing" is
+    information, not an error."""
+
+    tournament: str
+    target_market: str
+    ts_utc: datetime
+    config_path: Optional[str] = None
+    id: Optional[int] = None
+
+
+@dataclass
+class ScanPassport:
+    """One candidate's archived report from one run.
+
+    Scalar fields are lifted straight from ``scanner.CandidateReport``
+    (same names, same units) for SQL-friendly querying. ``report`` is the
+    ENTIRE report as decoded JSON -- with the usual JSON round-trip
+    caveats: dict keys become strings (``bench_depth``'s round numbers
+    included) and tuples become lists. For analysis use the scalar
+    columns; ``report`` is the archive of record.
+    """
+
+    run_id: int
+    team: str
+    fuel_verdict: str
+    data_complete: bool
+    no_price: float
+    premium_pct: float
+    required_multiplier: float
+    available_multiplier: float
+    deadness: float
+    p_stays_dead: float
+    ev_lockin: float
+    ev_hold: float
+    report: dict
+    id: Optional[int] = None
+
+
 #: Append-only migration scripts; index i upgrades user_version i -> i+1.
 #: NEVER edit an entry that has shipped -- add a new one.
 _MIGRATIONS: list[str] = [
@@ -116,6 +158,37 @@ _MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_snapshots_lookup
         ON price_snapshots (tournament, team, market, ts_utc);
+    """,
+    # v1 -> v2: scan passports (one run = one scan() invocation; one
+    # passport = one CandidateReport). Scalar columns mirror the report
+    # fields worth querying in SQL; report_json archives the WHOLE report.
+    """
+    CREATE TABLE scan_runs (
+        id            INTEGER PRIMARY KEY,
+        ts_utc        TEXT NOT NULL,
+        tournament    TEXT NOT NULL,
+        target_market TEXT NOT NULL,
+        config_path   TEXT
+    );
+    CREATE INDEX idx_runs_tournament ON scan_runs (tournament, ts_utc);
+
+    CREATE TABLE scan_passports (
+        id                   INTEGER PRIMARY KEY,
+        run_id               INTEGER NOT NULL REFERENCES scan_runs (id),
+        team                 TEXT NOT NULL,
+        fuel_verdict         TEXT NOT NULL,
+        data_complete        INTEGER NOT NULL,
+        no_price             REAL NOT NULL,
+        premium_pct          REAL NOT NULL,
+        required_multiplier  REAL NOT NULL,
+        available_multiplier REAL NOT NULL,
+        deadness             REAL NOT NULL,
+        p_stays_dead         REAL NOT NULL,
+        ev_lockin            REAL NOT NULL,
+        ev_hold              REAL NOT NULL,
+        report_json          TEXT NOT NULL
+    );
+    CREATE INDEX idx_passports_run ON scan_passports (run_id);
     """,
 ]
 
@@ -234,4 +307,93 @@ class Storage:
                 id=row["id"],
             )
             for row in self._conn.execute(query, params)
+        ]
+
+    # -- scan passports -------------------------------------------------------
+
+    def record_scan(
+        self,
+        tournament: str,
+        target_market: str,
+        reports: Iterable,
+        config_path: Optional[str] = None,
+        ts_utc: Optional[datetime] = None,
+    ) -> int:
+        """Archive one ``scanner.scan()`` invocation: a ``scan_runs`` row
+        plus one passport per ``CandidateReport``. Returns the run id.
+
+        ``reports`` are ``scanner.CandidateReport`` dataclasses (typed
+        loosely to keep storage import-free of scanner); an empty iterable
+        still records the run.
+        """
+        ts = ts_utc or utcnow()
+        if ts.tzinfo is None:
+            raise StorageError("record_scan(ts_utc=...) must be timezone-aware")
+
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO scan_runs (ts_utc, tournament, target_market, config_path)"
+                " VALUES (?, ?, ?, ?)",
+                (ts.astimezone(timezone.utc).isoformat(), tournament, target_market,
+                 str(config_path) if config_path is not None else None),
+            )
+            run_id = cursor.lastrowid
+            for r in reports:
+                self._conn.execute(
+                    """
+                    INSERT INTO scan_passports
+                        (run_id, team, fuel_verdict, data_complete, no_price,
+                         premium_pct, required_multiplier, available_multiplier,
+                         deadness, p_stays_dead, ev_lockin, ev_hold, report_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id, r.team, r.fuel_verdict, int(r.data_complete),
+                        r.no_price, r.premium_pct, r.required_multiplier,
+                        r.available_multiplier, r.deadness, r.p_stays_dead,
+                        r.ev_lockin, r.ev_hold,
+                        json.dumps(asdict(r), ensure_ascii=False),
+                    ),
+                )
+        return run_id
+
+    def runs(self, tournament: Optional[str] = None) -> list[ScanRun]:
+        """Recorded runs, newest first, optionally for one tournament."""
+        query = "SELECT * FROM scan_runs"
+        params: list = []
+        if tournament is not None:
+            query += " WHERE tournament = ?"
+            params.append(tournament)
+        query += " ORDER BY ts_utc DESC, id DESC"
+        return [
+            ScanRun(
+                tournament=row["tournament"], target_market=row["target_market"],
+                ts_utc=datetime.fromisoformat(row["ts_utc"]),
+                config_path=row["config_path"], id=row["id"],
+            )
+            for row in self._conn.execute(query, params)
+        ]
+
+    def latest_run(self, tournament: str) -> Optional[ScanRun]:
+        found = self.runs(tournament)
+        return found[0] if found else None
+
+    def passports(self, run_id: int) -> list[ScanPassport]:
+        """Passports of one run, in the order the scan produced them."""
+        return [
+            ScanPassport(
+                run_id=row["run_id"], team=row["team"],
+                fuel_verdict=row["fuel_verdict"],
+                data_complete=bool(row["data_complete"]),
+                no_price=row["no_price"], premium_pct=row["premium_pct"],
+                required_multiplier=row["required_multiplier"],
+                available_multiplier=row["available_multiplier"],
+                deadness=row["deadness"], p_stays_dead=row["p_stays_dead"],
+                ev_lockin=row["ev_lockin"], ev_hold=row["ev_hold"],
+                report=json.loads(row["report_json"]), id=row["id"],
+            )
+            for row in self._conn.execute(
+                "SELECT * FROM scan_passports WHERE run_id = ? ORDER BY id ASC",
+                (run_id,),
+            )
         ]

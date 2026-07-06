@@ -134,3 +134,99 @@ def test_newer_schema_is_rejected_not_guessed(tmp_path):
 
     with pytest.raises(StorageError, match="более"):
         Storage(db)
+
+
+def test_v1_database_migrates_forward_and_keeps_data(tmp_path):
+    """A DB created by the snapshots-only evhedge must open in this one,
+    get the new tables, and keep its old rows."""
+    import sqlite3
+
+    from evhedge.storage import _MIGRATIONS
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_MIGRATIONS[0])
+    conn.execute(
+        "INSERT INTO price_snapshots (ts_utc, tournament, team, market, price_pct, source)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (T0.isoformat(), "FIFA World Cup 2026", "Morocco", "winner_no", 97.0, "board"),
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    with Storage(db) as store:
+        (version,) = store._conn.execute("PRAGMA user_version").fetchone()
+        assert version == SCHEMA_VERSION
+        assert len(store.snapshots("FIFA World Cup 2026")) == 1
+        assert store.runs() == []  # new table exists and is empty
+
+
+# --- scan passports --------------------------------------------------------------
+
+def _mini_scan_reports():
+    """Real CandidateReports from a real scan (storage must fit the actual
+    types, not hand-mocked ones)."""
+    from evhedge.scanner import ScannerConfig, StageMeta, scan
+
+    config = ScannerConfig(
+        tournament="Four Team Cup",
+        stages_meta=[StageMeta("playoff", "single_elim", "bo3", True)],
+        teams={"TeamA": 40.0, "TeamB": 5.0, "TeamC": 3.0, "TeamD": 45.0},
+        bracket=[["TeamA", "TeamB"], ["TeamC", "TeamD"]],
+        target_market="winner",
+        no_prices={"TeamB": 91.0, "TeamC": 93.0},
+    )
+    return scan(config)
+
+
+def test_record_scan_round_trip(tmp_path):
+    reports = _mini_scan_reports()
+    with Storage(tmp_path / "e.db") as store:
+        run_id = store.record_scan(
+            "Four Team Cup", "winner", reports,
+            config_path="configs/four_team.yaml", ts_utc=T0,
+        )
+
+        run = store.latest_run("Four Team Cup")
+        assert run.id == run_id
+        assert run.target_market == "winner"
+        assert run.ts_utc == T0
+        assert run.config_path == "configs/four_team.yaml"
+
+        passports = store.passports(run_id)
+        assert [p.team for p in passports] == [r.team for r in reports]
+        for passport, report in zip(passports, reports):
+            assert passport.fuel_verdict == report.fuel_verdict
+            assert passport.data_complete == report.data_complete
+            assert passport.deadness == pytest.approx(report.deadness)
+            assert passport.ev_lockin == pytest.approx(report.ev_lockin)
+            # the archive carries the nested parts the scalars don't
+            assert passport.report["sensitivity"].keys() == report.sensitivity.keys()
+            assert passport.report["sources_breakdown"] == report.sources_breakdown
+            assert passport.report["liquidity"]["status"] == report.liquidity.status
+
+
+def test_record_scan_empty_run_is_still_recorded(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        run_id = store.record_scan("Empty Cup", "winner", [], ts_utc=T0)
+        assert store.passports(run_id) == []
+        assert store.latest_run("Empty Cup") is not None
+
+
+def test_runs_newest_first_per_tournament(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        store.record_scan("Cup", "winner", [], ts_utc=T0)
+        newer = store.record_scan("Cup", "winner", [], ts_utc=T0 + timedelta(hours=6))
+        store.record_scan("Other Cup", "winner", [], ts_utc=T0 + timedelta(hours=9))
+
+        cup_runs = store.runs("Cup")
+        assert [r.id for r in cup_runs][0] == newer
+        assert len(cup_runs) == 2
+        assert len(store.runs()) == 3
+
+
+def test_record_scan_rejects_naive_timestamp(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        with pytest.raises(StorageError, match="timezone-aware"):
+            store.record_scan("Cup", "winner", [], ts_utc=datetime(2026, 7, 6))
