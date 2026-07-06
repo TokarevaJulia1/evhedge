@@ -590,14 +590,15 @@ def pull_command(
     table.add_column("Рынков", justify="right")
     table.add_column("Снапшотов", justify="right")
     table.add_column("Резолвов", justify="right")
-    table.add_column("Пропущено (плейсх./форма/нерешено/цена)", justify="right")
+    table.add_column("Пропущено (плейсх./форма/нерешено/цена/лайв)", justify="right")
     for s in summaries:
         table.add_row(
             "; ".join(s.labels),
             str(s.markets_seen),
             str(s.snapshots_written),
             str(s.resolves_written),
-            f"{s.skipped_placeholders}/{s.skipped_shape}/{s.skipped_unresolved}/{s.skipped_price_range}",
+            f"{s.skipped_placeholders}/{s.skipped_shape}/{s.skipped_unresolved}"
+            f"/{s.skipped_price_range}/{s.skipped_live}",
         )
     console.print(table)
 

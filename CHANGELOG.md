@@ -27,6 +27,15 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- `scripts/ewc_watch.bat` — вахта пре-матч котировок EWC: луп с шагом
+  15 минут, каждый прогон — `evhedge pull` (доска победителя, региональный
+  агрегат, серии матчей, резолвы) в `data/ewc2026.db`; падение pull (сеть)
+  не убивает луп — ретрай на следующей итерации. Остановка Ctrl+C.
+- `collect.py`: пропуск лайв-матчей — `_event_is_live` (флаг `live` от
+  Gamma ИЛИ `startTime <= now`, ремень и подтяжки: флаг может лагать от
+  часов), счётчик `skipped_live` в `CollectSummary` и колонке `pull`.
+  Пре-матчевая серия цен заканчивается на старте матча: in-play цены —
+  не цены входа и намеренно не записываются.
 - `evhedge/collect.py` + `evhedge pull` — автоматический сбор с Gamma в
   storage (закрывает шов «Gamma-листинг не подключён к CLI»):
   - `collect_board(store, tournament, event_slug, label)` — Yes/No-доска

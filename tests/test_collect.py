@@ -115,6 +115,30 @@ OTHER_TOURNAMENT = {
     ],
 }
 
+# Match that has gone live (Gamma live flag): pre-match series is over,
+# its price must NOT be recorded.
+LIVE_MATCH = {
+    "slug": "dota2-ts8-mouz",
+    "title": "Dota 2: Team Spirit vs MOUZ (BO2) - Esports World Cup Group C",
+    "live": True,
+    "markets": [
+        _market("series", 0.8, 0.2, outcomes=("Team Spirit", "MOUZ"),
+                group_title="Match Winner"),
+    ],
+}
+
+# Live flag lagging, but startTime already passed: belt-and-braces skip.
+STARTED_MATCH = {
+    "slug": "dota2-rnx-vg",
+    "title": "Dota 2: REKONIX vs Vici Gaming (BO2) - Esports World Cup Group C",
+    "live": False,
+    "startTime": "2020-01-01T00:00:00Z",
+    "markets": [
+        _market("series", 0.1, 0.9, outcomes=("REKONIX", "Vici Gaming"),
+                group_title="Match Winner"),
+    ],
+}
+
 
 def test_collect_match_markets_legs_and_resolves(tmp_path, monkeypatch):
     def fake_fetch(tag_slug, closed=False, start_date_min=None):
@@ -142,3 +166,21 @@ def test_collect_match_markets_legs_and_resolves(tmp_path, monkeypatch):
         assert summary.skipped_unresolved == 1
         # DreamLeague filtered out entirely
         assert all("DreamLeague" not in (r.note or "") for r in resolves)
+
+
+def test_collect_match_markets_skips_live_matches(tmp_path, monkeypatch):
+    """Once a match is live (flag OR clock past startTime), its pre-match
+    series is complete -- no more leg snapshots for it."""
+
+    def fake_fetch(tag_slug, closed=False, start_date_min=None):
+        return [] if closed else [OPEN_MATCH, LIVE_MATCH, STARTED_MATCH]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_tournament_markets", fake_fetch)
+    with Storage(tmp_path / "e.db") as store:
+        summary = collect_match_markets(
+            store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup"
+        )
+
+        assert summary.skipped_live == 2
+        legs = store.snapshots("EWC 2026 Dota 2", market="leg")
+        assert [l.team for l in legs] == ["Team Falcons"]  # only the pre-match one

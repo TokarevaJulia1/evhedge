@@ -63,6 +63,7 @@ class CollectSummary:
     skipped_shape: int = 0        # outcomes not in the expected form
     skipped_unresolved: int = 0   # closed but not cleanly 1/0 (e.g. Bo2 draw)
     skipped_price_range: int = 0  # price at exactly 0 or 100 -- unquotable as (0,100)
+    skipped_live: int = 0         # match already live: pre-match price history ends here
     labels: list[str] = field(default_factory=list)
 
 
@@ -166,6 +167,23 @@ def _is_result_market(market: dict) -> bool:
     )
 
 
+def _event_is_live(event: dict, now: datetime) -> bool:
+    """True once the match has started: Gamma's ``live`` flag OR
+    ``startTime <= now`` (belt and braces -- the flag can lag the clock).
+    Once live, the pre-match price series is complete; in-play drift is
+    noise for entry pricing and is deliberately not recorded."""
+    if event.get("live"):
+        return True
+    start_time = event.get("startTime")
+    if not start_time:
+        return False
+    try:
+        started = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return started <= now
+
+
 def collect_match_markets(
     store: Storage,
     tournament: str,
@@ -179,7 +197,9 @@ def collect_match_markets(
 
     - OPEN "Match Winner" markets -> one ``leg`` snapshot: team A (first
       outcome) vs counterparty B, A's board price. This is the series
-      price a future scanner leg check reads.
+      price a future scanner leg check reads. Matches that have gone
+      LIVE are skipped (``skipped_live``): the pre-match series ends at
+      throw-in, in-play prices are not entry prices.
     - CLOSED result markets (series + per-game) -> two ``Resolve`` rows,
       market label ``result:<event_slug>:<market title>``: "yes" for the
       team whose side settled at 1, "no" for the other. A closed market
@@ -220,6 +240,9 @@ def collect_match_markets(
             if not market.get("closed"):
                 if (market.get("groupItemTitle") or "") not in RESULT_MARKET_TITLES:
                     continue  # open per-game props of the series: prices not needed
+                if _event_is_live(event, ts):
+                    summary.skipped_live += 1
+                    continue
                 price_pct = prices[0] * 100.0
                 if not (0.0 < price_pct < 100.0):
                     summary.skipped_price_range += 1
