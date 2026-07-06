@@ -42,6 +42,10 @@ The three checks:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Union
+
+from evhedge.config_io import ConfigError, _read_yaml_file
 
 #: Mandatory caveat attached to EVERY result this module produces. Board
 #: prices are a display; only order-book asks (bids, for selling) are
@@ -262,4 +266,114 @@ def vertical_check(team: str, ladder: list[tuple[str, float]]) -> VerticalResult
         violations=violations,
         flags=flags,
         is_signal=bool(violations),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Board config: YAML in, all checks out (for `evhedge check`)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BoardConfig:
+    """Parsed input for one board's worth of consistency checks.
+
+    All three sections are optional in the YAML -- a config may carry just
+    a basket, just identities, etc. Member mappings and ladders come
+    hand-written (see module docstring on why there's no auto-derivation).
+    """
+
+    board: str
+    baskets: list[tuple[str, dict[str, float], int]] = field(default_factory=list)
+    identities: list[tuple[tuple[str, float], dict[str, float]]] = field(default_factory=list)
+    verticals: list[tuple[str, list[tuple[str, float]]]] = field(default_factory=list)
+
+
+@dataclass
+class BoardCheckReport:
+    """Everything ``run_board_checks`` found, per check type. Each nested
+    result carries its own mandatory ``caveat``."""
+
+    board: str
+    baskets: list[tuple[str, BasketResult]] = field(default_factory=list)
+    identities: list[IdentityResult] = field(default_factory=list)
+    verticals: list[VerticalResult] = field(default_factory=list)
+
+
+def load_board_config(path: Union[str, Path]) -> BoardConfig:
+    """Load a board-check YAML config.
+
+    Expected shape (every section after ``board`` optional)::
+
+        board: "WC2026 winner board"
+        baskets:
+          - name: "full winner board NO"      # optional label
+            slots: 1
+            markets: {TeamA: 62.0, TeamB: 79.4}
+        identities:
+          - parent: {name: "CONCACAF winner", yes_pct: 9.4}
+            members: {USA: 8.5, Mexico: 0.2, Canada: 0.1}
+        verticals:
+          - team: Morocco
+            ladder:
+              - {stage: reach_semi, yes_pct: 12.0}
+              - {stage: reach_final, yes_pct: 8.0}
+              - {stage: winner, yes_pct: 3.0}
+
+    Raises:
+        ConfigError: Malformed YAML, missing ``board``, or a section entry
+            missing its required keys.
+    """
+    path = Path(path)
+    data = _read_yaml_file(path)
+
+    if not data.get("board"):
+        raise ConfigError(f"{path}: отсутствует обязательное поле 'board'")
+
+    baskets = []
+    for i, entry in enumerate(data.get("baskets") or []):
+        try:
+            baskets.append((
+                str(entry.get("name", f"basket #{i + 1}")),
+                {str(k): float(v) for k, v in entry["markets"].items()},
+                int(entry["slots"]),
+            ))
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise ConfigError(f"{path}: baskets[{i}]: {e}") from e
+
+    identities = []
+    for i, entry in enumerate(data.get("identities") or []):
+        try:
+            parent = entry["parent"]
+            identities.append((
+                (str(parent["name"]), float(parent["yes_pct"])),
+                {str(k): float(v) for k, v in entry["members"].items()},
+            ))
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise ConfigError(f"{path}: identities[{i}]: {e}") from e
+
+    verticals = []
+    for i, entry in enumerate(data.get("verticals") or []):
+        try:
+            ladder = [(str(r["stage"]), float(r["yes_pct"])) for r in entry["ladder"]]
+            verticals.append((str(entry["team"]), ladder))
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise ConfigError(f"{path}: verticals[{i}]: {e}") from e
+
+    return BoardConfig(
+        board=str(data["board"]), baskets=baskets, identities=identities, verticals=verticals
+    )
+
+
+def run_board_checks(config: BoardConfig) -> BoardCheckReport:
+    """Run every check listed in ``config`` and collect the results.
+
+    Raises:
+        ConsistencyError: Propagated from any individual check on
+            malformed inputs (bad slot count, out-of-range price, ...).
+    """
+    return BoardCheckReport(
+        board=config.board,
+        baskets=[(name, basket_check(markets, slots)) for name, markets, slots in config.baskets],
+        identities=[identity_check(parent, members) for parent, members in config.identities],
+        verticals=[vertical_check(team, ladder) for team, ladder in config.verticals],
     )

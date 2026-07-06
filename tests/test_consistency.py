@@ -8,6 +8,7 @@ hit the same numbers.
 
 import pytest
 
+from evhedge.config_io import ConfigError
 from evhedge.consistency import (
     IDENTITY_MIN_EDGE_PCT,
     VERIFY_BOOK_CAVEAT,
@@ -16,6 +17,8 @@ from evhedge.consistency import (
     ConsistencyError,
     basket_check,
     identity_check,
+    load_board_config,
+    run_board_checks,
     vertical_check,
 )
 
@@ -159,3 +162,67 @@ def test_vertical_check_rejects_bad_inputs():
         vertical_check("TeamX", [("winner", 3.0)])
     with pytest.raises(ConsistencyError, match=r"\(0, 100\)"):
         vertical_check("TeamX", [("reach_final", 0.0), ("winner", 3.0)])
+
+
+# --- board config: YAML -> checks ------------------------------------------------
+
+BOARD_YAML = """\
+board: "WC2026 test board"
+baskets:
+  - name: "winner board NO"
+    slots: 1
+    markets: {TeamA: 62.0, TeamB: 79.4, TeamC: 83.04, TeamD: 72.0}
+identities:
+  - parent: {name: "CONCACAF winner", yes_pct: 9.4}
+    members: {USA: 8.5, Mexico: 0.2, Canada: 0.1}
+verticals:
+  - team: Morocco
+    ladder:
+      - {stage: reach_semi, yes_pct: 12.0}
+      - {stage: reach_final, yes_pct: 8.0}
+      - {stage: winner, yes_pct: 3.0}
+"""
+
+
+def test_load_board_config_and_run_checks_round_trip(tmp_path):
+    path = tmp_path / "board.yaml"
+    path.write_text(BOARD_YAML, encoding="utf-8")
+
+    report = run_board_checks(load_board_config(path))
+
+    assert report.board == "WC2026 test board"
+    (name, basket) = report.baskets[0]
+    assert name == "winner board NO"
+    assert basket.return_pct == pytest.approx(1.2, abs=0.01)
+
+    identity = report.identities[0]
+    assert identity.diff_pct == pytest.approx(0.6)
+    assert identity.rich_side == "parent"
+
+    vertical = report.verticals[0]
+    assert vertical.team == "Morocco"
+    assert vertical.violations == []
+
+    for result in (basket, identity, vertical):
+        assert result.caveat == VERIFY_BOOK_CAVEAT
+
+
+def test_load_board_config_sections_optional(tmp_path):
+    path = tmp_path / "board.yaml"
+    path.write_text('board: "just a name"\n', encoding="utf-8")
+    report = run_board_checks(load_board_config(path))
+    assert report.baskets == [] and report.identities == [] and report.verticals == []
+
+
+def test_load_board_config_missing_board_raises(tmp_path):
+    path = tmp_path / "board.yaml"
+    path.write_text("baskets: []\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="board"):
+        load_board_config(path)
+
+
+def test_load_board_config_malformed_section_raises(tmp_path):
+    path = tmp_path / "board.yaml"
+    path.write_text('board: "b"\nbaskets:\n  - slots: 1\n', encoding="utf-8")  # no markets
+    with pytest.raises(ConfigError, match=r"baskets\[0\]"):
+        load_board_config(path)
