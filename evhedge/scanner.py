@@ -700,6 +700,24 @@ class CandidateReport:
     available_multiplier_range: Optional[tuple[float, float]] = None
 
 
+#: Verdict sort order for ``sort_candidates``. DESIGN CHOICE:
+#: INSUFFICIENT_DATA sits between THIN and FAILS -- it must not rank
+#: alongside data-complete candidates (that's its whole point), but a
+#: data-complete FAILS is a conclusive "no" while INSUFFICIENT_DATA might
+#: still become tradable once the missing legs get quoted, so it sorts
+#: above FAILS, not below.
+FUEL_VERDICT_SORT_ORDER = ("SOLID", "THIN", INSUFFICIENT_DATA, "FAILS")
+
+
+def sort_candidates(reports: list[CandidateReport]) -> list[CandidateReport]:
+    """Sort reports by fuel verdict (``FUEL_VERDICT_SORT_ORDER``), then by
+    deadness ascending (an easier path first) within the same verdict."""
+    order = {v: i for i, v in enumerate(FUEL_VERDICT_SORT_ORDER)}
+    return sorted(
+        reports, key=lambda r: (order.get(r.fuel_verdict, len(order)), r.deadness)
+    )
+
+
 def scan(
     config: ScannerConfig,
     token_ids: Optional[dict[str, str]] = None,

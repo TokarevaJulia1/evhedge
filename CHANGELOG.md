@@ -27,6 +27,15 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- `scanner.py`: `sort_candidates(reports)` + `FUEL_VERDICT_SORT_ORDER` —
+  порядок для CLI-таблицы: вердикт (SOLID, THIN, INSUFFICIENT_DATA,
+  FAILS), внутри вердикта — deadness по возрастанию. DESIGN CHOICE:
+  INSUFFICIENT_DATA между THIN и FAILS — не ранжируется наравне с
+  полными, но выше заключительного «нет» (FAILS): может стать торгуемым,
+  когда ноги закотируют. Тесты: fuel-фикстуры на числах реальных находок
+  — Марокко (премия 7.6% -> требуемый x12.16, заголовочное «x12.2») и
+  Норвегия (4.7% -> x20.28 «x20.3», ноги 47/35/28 -> доступный x21.71,
+  ratio 1.07 -> THIN).
 - `consistency.py`: `BoardConfig`/`load_board_config`/`run_board_checks` —
   YAML-конфиг доски (секции `baskets`/`identities`/`verticals`, все
   опциональны) и прогон всех перечисленных проверок за один вызов; основа

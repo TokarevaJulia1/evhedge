@@ -21,6 +21,7 @@ from evhedge.scanner import (
     rounds_to_boss,
     rounds_to_title,
     scan,
+    sort_candidates,
 )
 
 SINGLE_ELIM_STAGE = [StageMeta("playoff", "single_elim", "bo3", True)]
@@ -239,6 +240,83 @@ def test_fuel_check_verdict_thresholds_direct():
 
     fails = make(90.0, 20.0)  # available = 1/0.20 = 5.0 -> ratio 0.56 -> FAILS
     assert fails.verdict == "FAILS"
+
+
+# --- FUEL CHECK: real-finding fixtures (Morocco / Norway, WC2026) -------------
+
+def test_fuel_check_morocco_reach_final_premium_7_6_requires_x12_2():
+    """Morocco NO-to-final, Polymarket 2 Jul 2026: Yes ask 7.6c ->
+    premium 7.6% -> required multiplier 12.16 (the "x12.2" headline)."""
+    config = ScannerConfig(
+        tournament="FIFA World Cup 2026", stages_meta=SINGLE_ELIM_STAGE,
+        teams={"Morocco": 3.4, "OppQF": 12.0}, bracket=["Morocco", "OppQF"],
+        target_market="winner", no_prices={"Morocco": 92.4},
+    )
+    model = TournamentModel(config)
+    fuel = fuel_check(model, "Morocco", depth=1, no_price_pct=92.4)
+
+    assert fuel.premium_pct == pytest.approx(7.6)
+    assert fuel.required_multiplier == pytest.approx(12.16, abs=0.01)
+
+
+def test_fuel_check_norway_premium_4_7_thin_at_legs_47_35_28():
+    """Norway winner-NO at 95.3 (premium 4.7% -> required 20.28, the
+    "x20.3" headline) with own leg asks 47/35/28 -> available 21.71,
+    ratio 1.07 -> THIN: the legs cover the premium with almost nothing
+    to spare."""
+    # Linear 3-round path: fixed opponents A (QF), B (SF), C (F).
+    bracket = [[["Norway", "OppA"], "OppB"], "OppC"]
+    config = ScannerConfig(
+        tournament="FIFA World Cup 2026", stages_meta=SINGLE_ELIM_STAGE,
+        teams={"Norway": 4.7, "OppA": 20.0, "OppB": 15.0, "OppC": 25.0},
+        bracket=bracket, target_market="winner", no_prices={"Norway": 95.3},
+        leg_prices={
+            ("Norway", "OppA"): 47.0,
+            ("Norway", "OppB"): 35.0,
+            ("Norway", "OppC"): 28.0,
+        },
+    )
+    model = TournamentModel(config)
+    fuel = fuel_check(model, "Norway", depth=3, no_price_pct=95.3)
+
+    assert fuel.premium_pct == pytest.approx(4.7)
+    assert fuel.required_multiplier == pytest.approx(20.28, abs=0.01)
+    assert fuel.available_multiplier == pytest.approx(21.71, abs=0.01)
+    assert fuel.verdict == "THIN"
+    # every leg came from the market, none from the model
+    assert model.source_counts["market"] == 3
+    assert model.source_counts["no_data"] == 0
+
+
+# --- sort_candidates -----------------------------------------------------------
+
+def _fake_report(team, fuel_verdict, deadness):
+    from evhedge.scanner import CandidateReport, LiquidityInfo
+
+    return CandidateReport(
+        team=team, liquidity=LiquidityInfo(), data_complete=True,
+        deadness=deadness, p_stays_dead=1.0, bench_depth={}, min_opp_strength=None,
+        rounds_to_boss=None, no_price=90.0, premium_pct=10.0,
+        required_multiplier=9.0, available_multiplier=10.0, fuel_verdict=fuel_verdict,
+        leg_profile_flag=None, hype_flag=None, ev_lockin=0.0, ev_hold=0.0,
+        terminal_branch_pnl=0.0, sensitivity={}, sources_breakdown={},
+        excluded_stages=[],
+    )
+
+
+def test_sort_candidates_verdict_then_deadness():
+    reports = [
+        _fake_report("fails", "FAILS", 0.1),
+        _fake_report("thin_hard", "THIN", 0.9),
+        _fake_report("insufficient", "INSUFFICIENT_DATA", 0.1),
+        _fake_report("solid", "SOLID", 0.5),
+        _fake_report("thin_easy", "THIN", 0.2),
+    ]
+    ordered = [r.team for r in sort_candidates(reports)]
+    # SOLID first; THIN by deadness ascending; INSUFFICIENT_DATA does not
+    # rank alongside data-complete verdicts but sits above the conclusive
+    # FAILS (it might still become tradable once the legs get quoted).
+    assert ordered == ["solid", "thin_easy", "thin_hard", "insufficient", "fails"]
 
 
 # --- LEG PROFILE / HYPE flags ------------------------------------------------
