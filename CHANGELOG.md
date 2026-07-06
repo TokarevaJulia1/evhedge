@@ -27,6 +27,13 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- `storage.py` (Заход 2, шаг 3) — резолвы: миграция v3 (`resolves`),
+  `Resolve` (outcome строго `yes|no` — резолюция РЫНКА, не нашей позиции:
+  NO-позиция выигрывает на `no`; оговорка в докстринге), `record_resolve`,
+  `resolves(tournament, team=, market=)`. Метки `market` те же, что у
+  снапшотов — резолвы чисто джойнятся с паспортами и снапшотами по
+  (tournament, team, market); отчёт «как вердикты отработали» — на этой
+  связке, в следующем заходе.
 - `storage.py` (Заход 2, шаг 2) — паспорта сканов: миграция v2
   (`scan_runs` + `scan_passports`), `record_scan(tournament,
   target_market, reports) -> run_id`, `runs()`/`latest_run()`/

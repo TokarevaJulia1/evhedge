@@ -7,6 +7,7 @@ import pytest
 from evhedge.storage import (
     SCHEMA_VERSION,
     PriceSnapshot,
+    Resolve,
     Storage,
     StorageError,
 )
@@ -230,3 +231,32 @@ def test_record_scan_rejects_naive_timestamp(tmp_path):
     with Storage(tmp_path / "e.db") as store:
         with pytest.raises(StorageError, match="timezone-aware"):
             store.record_scan("Cup", "winner", [], ts_utc=datetime(2026, 7, 6))
+
+
+# --- resolves ---------------------------------------------------------------------
+
+def test_resolve_round_trip_and_filtering(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        store.record_resolve(Resolve(
+            tournament="FIFA World Cup 2026", team="Morocco", market="reach_final_yes",
+            outcome="no", ts_utc=T0, note="eliminated in QF",
+        ))
+        store.record_resolve(Resolve(
+            tournament="FIFA World Cup 2026", team="Norway", market="winner_yes",
+            outcome="no", ts_utc=T0 + timedelta(days=3),
+        ))
+
+        (morocco,) = store.resolves("FIFA World Cup 2026", team="Morocco")
+        assert morocco.outcome == "no"
+        assert morocco.note == "eliminated in QF"
+        assert morocco.ts_utc == T0
+        assert len(store.resolves("FIFA World Cup 2026")) == 2
+        assert store.resolves("FIFA World Cup 2026", market="winner_yes")[0].team == "Norway"
+
+
+def test_resolve_rejects_bad_outcome_and_naive_ts():
+    with pytest.raises(StorageError, match="outcome"):
+        Resolve(tournament="t", team="A", market="winner_yes", outcome="won", ts_utc=T0)
+    with pytest.raises(StorageError, match="timezone-aware"):
+        Resolve(tournament="t", team="A", market="winner_yes", outcome="yes",
+                ts_utc=datetime(2026, 7, 6))

@@ -40,6 +40,9 @@ from typing import Iterable, Optional, Union
 #: accepts both, but only "book" prices are tradable.
 SNAPSHOT_SOURCES = ("board", "book")
 
+#: How a binary market can resolve.
+RESOLVE_OUTCOMES = ("yes", "no")
+
 
 class StorageError(Exception):
     """Raised for storage-layer problems: invalid snapshot fields, a
@@ -97,6 +100,41 @@ def utcnow() -> datetime:
     """Timezone-aware UTC now -- the only timestamp factory this module
     endorses (see rule 2 in the module docstring)."""
     return datetime.now(timezone.utc)
+
+
+@dataclass
+class Resolve:
+    """How one market actually resolved.
+
+    ``market`` uses the same labels as ``PriceSnapshot.market`` (see
+    module docstring) so resolves join cleanly against snapshots and
+    passports by (tournament, team, market).
+
+    Attributes:
+        outcome: "yes" or "no" -- the market's resolution, NOT whether our
+            position won (a NO position wins on outcome "no").
+        note: Free text, e.g. "eliminated in QF by France, 0:2".
+    """
+
+    tournament: str
+    team: str
+    market: str
+    outcome: str
+    ts_utc: datetime
+    note: Optional[str] = None
+    id: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in RESOLVE_OUTCOMES:
+            raise StorageError(
+                f"Resolve({self.team!r}, {self.market!r}).outcome must be one of "
+                f"{RESOLVE_OUTCOMES}, got {self.outcome!r}"
+            )
+        if self.ts_utc.tzinfo is None:
+            raise StorageError(
+                f"Resolve({self.team!r}, {self.market!r}).ts_utc must be timezone-aware"
+            )
+        self.ts_utc = self.ts_utc.astimezone(timezone.utc)
 
 
 @dataclass
@@ -189,6 +227,21 @@ _MIGRATIONS: list[str] = [
         report_json          TEXT NOT NULL
     );
     CREATE INDEX idx_passports_run ON scan_passports (run_id);
+    """,
+    # v2 -> v3: market resolves -- how it actually ended. Joined to
+    # passports by (tournament, team, market) later, this is what turns
+    # archived verdicts into a calibration report.
+    """
+    CREATE TABLE resolves (
+        id         INTEGER PRIMARY KEY,
+        ts_utc     TEXT NOT NULL,
+        tournament TEXT NOT NULL,
+        team       TEXT NOT NULL,
+        market     TEXT NOT NULL,
+        outcome    TEXT NOT NULL,
+        note       TEXT
+    );
+    CREATE INDEX idx_resolves_lookup ON resolves (tournament, team, market);
     """,
 ]
 
@@ -396,4 +449,44 @@ class Storage:
                 "SELECT * FROM scan_passports WHERE run_id = ? ORDER BY id ASC",
                 (run_id,),
             )
+        ]
+
+    # -- resolves ---------------------------------------------------------------
+
+    def record_resolve(self, resolve: Resolve) -> int:
+        """Store one market resolution; returns its row id."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO resolves (ts_utc, tournament, team, market, outcome, note)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (resolve.ts_utc.isoformat(), resolve.tournament, resolve.team,
+                 resolve.market, resolve.outcome, resolve.note),
+            )
+        resolve.id = cursor.lastrowid
+        return resolve.id
+
+    def resolves(
+        self,
+        tournament: str,
+        team: Optional[str] = None,
+        market: Optional[str] = None,
+    ) -> list[Resolve]:
+        """Resolves for a tournament, optionally narrowed to one team
+        and/or market, ordered by timestamp ascending."""
+        query = "SELECT * FROM resolves WHERE tournament = ?"
+        params: list = [tournament]
+        if team is not None:
+            query += " AND team = ?"
+            params.append(team)
+        if market is not None:
+            query += " AND market = ?"
+            params.append(market)
+        query += " ORDER BY ts_utc ASC"
+        return [
+            Resolve(
+                tournament=row["tournament"], team=row["team"], market=row["market"],
+                outcome=row["outcome"], ts_utc=datetime.fromisoformat(row["ts_utc"]),
+                note=row["note"], id=row["id"],
+            )
+            for row in self._conn.execute(query, params)
         ]
