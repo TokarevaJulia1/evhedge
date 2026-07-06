@@ -1,0 +1,51 @@
+# EWC 2025 Dota 2 — многостадийный формат: групповой round_robin bo2,
+# затем survival-гаунтлет, затем single_elim плей-офф.
+#
+# Демонстрирует два механизма сканера разом:
+# 1. round_robin в stages_meta ОТКЛЮЧАЕТ power model для всего турнира —
+#    все пары без leg_prices станут "no_data", агрегаты выйдут диапазонами
+#    (0.2/0.8), а FUEL-вердикт при расхождении по диапазону —
+#    INSUFFICIENT_DATA (честное "не знаю" вместо правдоподобного числа).
+# 2. hedge_suitable: false у группы (bo2 — ничьи ломают чистый бинарный
+#    хедж) — стадия попадает в excluded_stages, а не молча выпадает.
+#
+# Числа — демонстрационные (в духе примера из докстринга scanner.py),
+# перед использованием заменить на живые котировки и сверить с книгой.
+tournament: "EWC 2025 Dota 2"
+
+stages_meta:
+  - {name: group, type: round_robin, match_format: bo2, hedge_suitable: false}
+  - {name: survival, type: gauntlet, match_format: bo3, hedge_suitable: true}
+  - {name: playoff, type: single_elim, match_format: bo3, hedge_suitable: true}
+
+teams:
+  Falcons: 34.5
+  Spirit: 21.0
+  XG: 12.5
+  GG: 8.0
+  BetBoom: 6.5
+  Tundra: 5.0
+  Liquid: 4.4
+  PARIVISION: 2.6
+
+target_market: winner
+
+no_prices:
+  PARIVISION: 91.9
+  Tundra: 94.0
+  Liquid: 94.5
+
+# Плей-офф часть (выжившие после группы/гаунтлета).
+bracket:
+  - - [Falcons, PARIVISION]
+    - [XG, Tundra]
+  - - [Spirit, Liquid]
+    - [GG, BetBoom]
+
+# Котируется только ближайший раунд; глубже — дыры (модель отключена).
+leg_prices:
+  - {teams: [Falcons, PARIVISION], ask_pct: 82.0}
+
+recent_upset: [PARIVISION]
+
+outright_threshold_pct: 10.0

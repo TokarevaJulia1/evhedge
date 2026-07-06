@@ -1,0 +1,61 @@
+# ЧМ-2026, состояние на 6 июля 2026: середина 1/8 финала.
+# 12 живых команд: 4 уже в 1/4 (свои матчи 1/8 сыграли 4-5 июля),
+# 8 доигрывают 1/8 финала 6-7 июля.
+#
+# ПРОВЕНАНС (важно): реальные якоря здесь — только из
+# examples/morocco_wc2026.yaml (котировки Polymarket 2 июля: Марокко
+# прошли Нидерланды по пенальти 30 июня, матч с Канадой 4 июля).
+# Результаты 1/8, состав пар и все остальные цены — ДЕМО-реконструкция
+# правдоподобного состояния, СОБРАННАЯ ВРУЧНУЮ, а не снятая с живого
+# рынка. Перед реальным использованием заменить на актуальную сетку и
+# котировки (и, по правилу проекта, сверить с книгой: board-level цены —
+# витрина).
+tournament: "FIFA World Cup 2026"
+
+stages_meta:
+  # Оставшаяся часть турнира — чистый нокаут, один тип стадии.
+  - {name: knockout, type: single_elim, match_format: "90min+ET/pens", hedge_suitable: true}
+
+# Аутрайт-проценты (winner) 12 живых команд.
+teams:
+  Brazil: 22.0
+  France: 19.0
+  Argentina: 14.5
+  Spain: 12.0
+  England: 9.0
+  Portugal: 7.0
+  Norway: 5.2
+  Morocco: 3.4
+  Uruguay: 2.6
+  Mexico: 2.2
+  Senegal: 1.6
+  Japan: 1.3
+
+target_market: winner
+
+# NO-аски рынка "выиграет турнир" — только у лонгшотов, за которыми следим.
+no_prices:
+  England: 91.5
+  Portugal: 93.5
+  Norway: 95.3
+  Morocco: 97.0
+
+# Сетка от 1/4 финала (корень = финал). Лист на месте пары = команда уже
+# в 1/4; вложенная пара = матч 1/8 ещё не сыгран (6-7 июля).
+bracket:
+  - - ["France", ["Spain", "Uruguay"]]
+    - ["Morocco", ["England", "Senegal"]]
+  - - ["Norway", ["Argentina", "Mexico"]]
+    - ["Brazil", ["Portugal", "Japan"]]
+
+# Котируемые ноги — только реально стоящие матчи 1/8 (глубже никто не
+# котирует "A против победителя другой половины").
+leg_prices:
+  - {teams: [Spain, Uruguay], ask_pct: 78.0}
+  - {teams: [England, Senegal], ask_pct: 63.0}
+  - {teams: [Argentina, Mexico], ask_pct: 71.0}
+  - {teams: [Portugal, Japan], ask_pct: 66.0}
+
+recent_upset: [Morocco]   # Нидерланды по пенальти, 30 июня
+
+outright_threshold_pct: 10.0
