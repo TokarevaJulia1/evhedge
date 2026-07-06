@@ -27,9 +27,18 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 from evhedge.config_io import ConfigError, load_full_config
+from evhedge.consistency import (
+    VERIFY_BOOK_CAVEAT,
+    ConsistencyError,
+    load_board_config,
+    run_board_checks,
+)
+from evhedge.data_sources import polymarket as polymarket_ds
+from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.engine import compute_ev
 from evhedge.montecarlo import plot_distribution, simulate
 from evhedge.ranking import load_configs_from_dir, rank_teams
+from evhedge.scanner import ScannerError, load_scanner_config, scan, sort_candidates
 
 console = Console(width=120)
 error_console = Console(width=120, stderr=True, style="bold red")
@@ -288,6 +297,197 @@ def rank_command(
         for path, message in failures:
             warn_table.add_row(str(path), message)
         warn_console.print(warn_table)
+
+
+def _fmt_range(point: float, rng, fmt: str = "{:.2f}") -> str:
+    """Point value when data is complete, low–high band when it isn't."""
+    if rng is None:
+        return fmt.format(point)
+    return f"{fmt.format(rng[0])}–{fmt.format(rng[1])}"
+
+
+def _fmt_liquidity(liq) -> str:
+    if liq.status == "checked":
+        avg = f"@{liq.executable_avg_price:.2f}" if liq.executable_avg_price is not None else ""
+        return f"${liq.executable_usd:.0f}{avg}"
+    return "unknown"
+
+
+@main.command("scan")
+@click.argument("config", type=click.Path(path_type=Path))
+@click.option(
+    "--min-outright",
+    type=float,
+    default=None,
+    help="Drop candidates with outright % below this (filter out dust; the "
+    "config's outright_threshold_pct stays the UPPER bound).",
+)
+@click.option("--top", type=int, default=None, help="Only show the top K rows.")
+def scan_command(config: Path, min_outright: Optional[float], top: Optional[int]) -> None:
+    """Scan CONFIG.yaml (scanner format) for long-shot bracket candidates."""
+    try:
+        scanner_config = load_scanner_config(config)
+        reports = scan(scanner_config)
+    except (ConfigError, ScannerError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if min_outright is not None:
+        reports = [r for r in reports if scanner_config.teams[r.team] >= min_outright]
+    if not reports:
+        warn_console.print("Ни одного кандидата (порог/фильтры/no_prices).")
+        return
+
+    reports = sort_candidates(reports)
+    if top is not None:
+        reports = reports[:top]
+
+    table = Table(title=f"{scanner_config.tournament} — {scanner_config.target_market}")
+    table.add_column("#", justify="right")
+    table.add_column("Команда")
+    table.add_column("FUEL")
+    table.add_column("NO ask", justify="right")
+    table.add_column("Прем.%", justify="right")
+    table.add_column("Треб.×", justify="right")
+    table.add_column("Дост.×", justify="right")
+    table.add_column("Deadness", justify="right")
+    table.add_column("Ликвидность", justify="right")
+    table.add_column("рынок/модель/дыры", justify="right")
+    table.add_column("Флаги")
+
+    for i, r in enumerate(reports, start=1):
+        flags = []
+        if r.leg_profile_flag:
+            flags.append("FAV")
+        if r.hype_flag:
+            flags.append("HYPE")
+        src = r.sources_breakdown
+        table.add_row(
+            str(i),
+            r.team,
+            r.fuel_verdict,
+            f"{r.no_price:.1f}",
+            f"{r.premium_pct:.1f}",
+            f"{r.required_multiplier:.1f}",
+            _fmt_range(r.available_multiplier, r.available_multiplier_range, "{:.1f}"),
+            _fmt_range(r.deadness, r.deadness_range),
+            _fmt_liquidity(r.liquidity),
+            f"{src['market']}/{src['model']}/{src['no_data']}",
+            " ".join(flags) or "—",
+        )
+
+    console.print(table)
+
+    excluded = reports[0].excluded_stages
+    if excluded:
+        warn_console.print(f"Стадии вне roll-цепочки: {', '.join(excluded)}")
+    warn_console.print(VERIFY_BOOK_CAVEAT)
+
+
+@main.command("book")
+@click.argument("token_id")
+@click.option("--side", type=click.Choice(["buy", "sell"]), default="buy", show_default=True)
+@click.option(
+    "--depth-to",
+    "depth_to",
+    type=float,
+    default=None,
+    help="Worst acceptable price, in 0..1 shares (0.05 = 5c): print the "
+    "executable USD size up to it.",
+)
+def book_command(token_id: str, side: str, depth_to: Optional[float]) -> None:
+    """Show the live CLOB order book for TOKEN_ID (top 10 levels per side)."""
+    if depth_to is not None and not (0.0 < depth_to < 1.0):
+        raise click.UsageError(
+            f"--depth-to задаётся в долях 0..1 (0.05 = 5c), получено {depth_to}"
+        )
+
+    try:
+        book = polymarket_ds.fetch_order_book(token_id)
+    except PolymarketAPIError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    table = Table(title=f"CLOB book {token_id}")
+    table.add_column("Side")
+    table.add_column("Цена", justify="right")
+    table.add_column("Размер, shares", justify="right")
+    table.add_column("USD", justify="right")
+
+    for lvl in sorted(book.asks, key=lambda l: l.price)[:10]:
+        table.add_row("ask", f"{lvl.price:.3f}", f"{lvl.size:.1f}", f"{lvl.price * lvl.size:.2f}")
+    for lvl in sorted(book.bids, key=lambda l: l.price, reverse=True)[:10]:
+        table.add_row("bid", f"{lvl.price:.3f}", f"{lvl.size:.1f}", f"{lvl.price * lvl.size:.2f}")
+    console.print(table)
+
+    if depth_to is not None:
+        usd, avg_price = polymarket_ds.executable_size(book, side, depth_to)
+        if avg_price is None:
+            warn_console.print(f"Исполнимо ({side} до {depth_to}): ничего (пустая книга/вне лимита)")
+        else:
+            console.print(f"Исполнимо ({side} до {depth_to}): ${usd:.2f} @ {avg_price:.4f} средняя")
+
+
+@main.command("check")
+@click.argument("config", type=click.Path(path_type=Path))
+def check_command(config: Path) -> None:
+    """Run board-level consistency checks from CONFIG.yaml."""
+    try:
+        report = run_board_checks(load_board_config(config))
+    except (ConfigError, ConsistencyError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if report.baskets:
+        table = Table(title=f"{report.board} — корзины (NO, фиксированные слоты)")
+        table.add_column("Корзина")
+        table.add_column("Кост", justify="right")
+        table.add_column("Выплата", justify="right")
+        table.add_column("Эдж, п.", justify="right")
+        table.add_column("Доходность", justify="right")
+        table.add_column("Сигнал")
+        for name, r in report.baskets:
+            table.add_row(
+                name, f"{r.cost_pct:.2f}", f"{r.payout_pct:.0f}",
+                f"{r.edge_pct:+.2f}", f"{r.return_pct:+.2f}%", "ДА" if r.is_signal else "—",
+            )
+        console.print(table)
+
+    if report.identities:
+        table = Table(title=f"{report.board} — агрегат = сумма членов")
+        table.add_column("Родитель")
+        table.add_column("Родит.%", justify="right")
+        table.add_column("Σ членов", justify="right")
+        table.add_column("Разрыв, п.", justify="right")
+        table.add_column("Богатая сторона")
+        table.add_column("Сигнал")
+        for r in report.identities:
+            table.add_row(
+                r.parent, f"{r.parent_yes_pct:.2f}", f"{r.members_sum_pct:.2f}",
+                f"{r.diff_pct:+.2f}", r.rich_side, "ДА" if r.is_signal else "—",
+            )
+        console.print(table)
+
+    if report.verticals:
+        table = Table(title=f"{report.board} — вертикали reach_X")
+        table.add_column("Команда")
+        table.add_column("Ступени", justify="right")
+        table.add_column("Нарушения", justify="right")
+        table.add_column("Флаги", justify="right")
+        table.add_column("Сигнал")
+        for r in report.verticals:
+            table.add_row(
+                r.team, str(len(r.ladder)), str(len(r.violations)),
+                str(len(r.flags)), "ДА" if r.is_signal else "—",
+            )
+        console.print(table)
+        for r in report.verticals:
+            for line in r.violations:
+                error_console.print(f"  {r.team}: {line}")
+            for line in r.flags:
+                warn_console.print(f"  {r.team}: {line}")
+
+    warn_console.print(VERIFY_BOOK_CAVEAT)
 
 
 if __name__ == "__main__":

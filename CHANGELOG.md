@@ -27,6 +27,23 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- CLI (Модуль 6) — три новые команды, бизнес-логики в `cli.py`
+  по-прежнему нет (сортировка — в `scanner.sort_candidates`, прогон
+  проверок — в `consistency.run_board_checks`):
+  - `evhedge scan BRACKET.yaml [--min-outright X] [--top K]` — rich-таблица
+    кандидатов, сортировка вердикт-затем-deadness; в строке видны
+    liquidity-статус, разбивка источников «рынок/модель/дыры», диапазоны
+    вместо точек при неполных данных, флаги FAV/HYPE; под таблицей —
+    excluded_stages и обязательный verify-book caveat. `--min-outright` —
+    НИЖНЯЯ граница аутрайта (отсев пыли), верхней остаётся
+    `outright_threshold_pct` из конфига.
+  - `evhedge book TOKEN_ID [--side buy|sell] [--depth-to PRICE]` — топ-10
+    уровней книги CLOB с обеих сторон; с `--depth-to` (в долях 0..1,
+    0.05 = 5c) — исполнимый размер в USD и средняя цена (утренний кейс
+    CONCACAF: $0.27 глубины за витринными 2.4c).
+  - `evhedge check BOARD_CONFIG.yaml` — прогон consistency-проверок
+    Модуля 5: таблицы корзин/тождеств/вертикалей, построчный вывод
+    нарушений и флагов, caveat в конце.
 - `scanner.py`: `sort_candidates(reports)` + `FUEL_VERDICT_SORT_ORDER` —
   порядок для CLI-таблицы: вердикт (SOLID, THIN, INSUFFICIENT_DATA,
   FAILS), внутри вердикта — deadness по возрастанию. DESIGN CHOICE:

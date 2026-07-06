@@ -5,8 +5,11 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from evhedge.cli import main
+from evhedge.data_sources.polymarket import BookLevel, OrderBook, PolymarketAPIError
 
-EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "examples" / "football_example.yaml"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
+EXAMPLE_PATH = EXAMPLES_DIR / "football_example.yaml"
+WC2026_PATH = EXAMPLES_DIR / "wc2026_bracket.yaml"
 
 
 _RANK_CONFIG_TEMPLATE = """\
@@ -157,4 +160,134 @@ def test_example_unsupported_sport_gives_clean_error():
 
     assert result.exit_code != 0
     assert "football" in result.output
+    assert "Traceback" not in result.output
+
+
+# --- scan ---------------------------------------------------------------------
+
+WC2026_CANDIDATES = ("England", "Portugal", "Norway", "Morocco")
+
+
+def test_scan_command_prints_all_candidates_and_caveat():
+    runner = CliRunner()
+    result = runner.invoke(main, ["scan", str(WC2026_PATH)])
+
+    assert result.exit_code == 0
+    for team in WC2026_CANDIDATES:
+        assert team in result.output
+    assert "verify book before trading" in result.output
+
+
+def test_scan_command_top_limits_rows():
+    runner = CliRunner()
+    result = runner.invoke(main, ["scan", str(WC2026_PATH), "--top", "1"])
+
+    assert result.exit_code == 0
+    shown = sum(team in result.output for team in WC2026_CANDIDATES)
+    assert shown == 1
+
+
+def test_scan_command_min_outright_filters_dust():
+    runner = CliRunner()
+    result = runner.invoke(main, ["scan", str(WC2026_PATH), "--min-outright", "5.0"])
+
+    assert result.exit_code == 0
+    assert "Morocco" not in result.output  # 3.4% outright < 5.0
+    assert "Norway" in result.output       # 5.2% outright >= 5.0
+
+
+def test_scan_command_missing_file_gives_clean_error():
+    runner = CliRunner()
+    result = runner.invoke(main, ["scan", "does_not_exist.yaml"])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "Ошибка" in result.output
+
+
+# --- book ---------------------------------------------------------------------
+
+def _fake_book():
+    return OrderBook(
+        token_id="tok",
+        asks=[BookLevel(0.031, 8.7), BookLevel(0.05, 200.0)],
+        bids=[BookLevel(0.024, 50.0)],
+    )
+
+
+def test_book_command_prints_levels_and_executable(monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.cli.polymarket_ds.fetch_order_book", lambda token_id: _fake_book()
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["book", "tok", "--side", "buy", "--depth-to", "0.031"])
+
+    assert result.exit_code == 0
+    assert "0.031" in result.output
+    # executable up to 0.031: only the first ask level -> 0.031 * 8.7 = 0.27
+    assert "$0.27" in result.output
+
+
+def test_book_command_depth_to_must_be_fraction(monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.cli.polymarket_ds.fetch_order_book", lambda token_id: _fake_book()
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["book", "tok", "--depth-to", "5"])
+
+    assert result.exit_code != 0
+    assert "0..1" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_book_command_api_error_gives_clean_error(monkeypatch):
+    def boom(token_id):
+        raise PolymarketAPIError("нет сети")
+
+    monkeypatch.setattr("evhedge.cli.polymarket_ds.fetch_order_book", boom)
+    runner = CliRunner()
+    result = runner.invoke(main, ["book", "tok"])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+
+
+# --- check --------------------------------------------------------------------
+
+_BOARD_YAML = """\
+board: "CLI test board"
+baskets:
+  - name: "winner NO"
+    slots: 1
+    markets: {TeamA: 62.0, TeamB: 79.4, TeamC: 83.04, TeamD: 72.0}
+identities:
+  - parent: {name: "CONCACAF winner", yes_pct: 9.4}
+    members: {USA: 8.5, Mexico: 0.2, Canada: 0.1}
+verticals:
+  - team: TeamX
+    ladder:
+      - {stage: reach_final, yes_pct: 8.0}
+      - {stage: winner, yes_pct: 8.6}
+"""
+
+
+def test_check_command_prints_findings_and_caveat(tmp_path):
+    path = tmp_path / "board.yaml"
+    path.write_text(_BOARD_YAML, encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["check", str(path)])
+
+    assert result.exit_code == 0
+    assert "+1.20%" in result.output          # the basket finding
+    assert "+0.60" in result.output           # the identity finding
+    assert "p_cond=1.075" in result.output    # the vertical violation
+    assert "verify book before trading" in result.output
+
+
+def test_check_command_missing_file_gives_clean_error():
+    runner = CliRunner()
+    result = runner.invoke(main, ["check", "does_not_exist.yaml"])
+
+    assert result.exit_code != 0
     assert "Traceback" not in result.output
