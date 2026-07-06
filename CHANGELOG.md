@@ -27,6 +27,21 @@
   с position-трекингом (который принесёт cost basis).
 
 ### Добавлено
+- Hype v2 (Заход 2, шаг 4) — апгрейд с ручного `recent_upset` на
+  вычисляемую скорость цены:
+  - `storage.price_velocity(tournament, team, market, window, now=)` —
+    pp/час по снапшотам окна; честный `None` при <2 точках или нулевом
+    интервале. Знак следует рынку: отрицательная velocity на `*_no` =
+    NO падает = команда растёт.
+  - `scanner.hype_assessment(config, team, no_velocity)` — вычисленное
+    ПОБЕЖДАЕТ, когда есть: решение только по
+    `velocity <= -HYPE_VELOCITY_THRESHOLD_PP_PER_HOUR`, даже для команды
+    из `recent_upset` (ручной флаг, противоречащий плоской цене, —
+    несвежая новость, не hype). Ручной `recent_upset` — только фолбэк при
+    `velocity = None`. `CandidateReport.hype_source`: `computed`/`manual`.
+  - DESIGN CHOICE: порог 1.0 pp/час, окно 24 ч — placeholder-полоса,
+    калибровать по реальным эпизодам, когда БД снапшотов накопится.
+  - `scan()` получил параметр `no_velocities_pp_per_hour`.
 - `storage.py` (Заход 2, шаг 3) — резолвы: миграция v3 (`resolves`),
   `Resolve` (outcome строго `yes|no` — резолюция РЫНКА, не нашей позиции:
   NO-позиция выигрывает на `no`; оговорка в докстринге), `record_resolve`,

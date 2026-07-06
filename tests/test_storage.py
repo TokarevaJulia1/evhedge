@@ -254,6 +254,44 @@ def test_resolve_round_trip_and_filtering(tmp_path):
         assert store.resolves("FIFA World Cup 2026", market="winner_yes")[0].team == "Norway"
 
 
+def test_price_velocity_pp_per_hour(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        store.record_snapshots([
+            _snap(ts_utc=T0, price_pct=97.0),
+            _snap(ts_utc=T0 + timedelta(hours=2), price_pct=93.6),
+        ])
+        v = store.price_velocity(
+            "FIFA World Cup 2026", "Morocco", "winner_no",
+            window=timedelta(hours=24), now=T0 + timedelta(hours=2),
+        )
+        # NO falls 97.0 -> 93.6 over 2h = -1.7 pp/h (team rising)
+        assert v == pytest.approx(-1.7)
+
+
+def test_price_velocity_honest_none_on_thin_history(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        # one point only -> None
+        store.record_snapshot(_snap(ts_utc=T0))
+        assert store.price_velocity(
+            "FIFA World Cup 2026", "Morocco", "winner_no",
+            window=timedelta(hours=24), now=T0,
+        ) is None
+
+        # second point exists but OUTSIDE the window -> still None
+        store.record_snapshot(_snap(ts_utc=T0 + timedelta(hours=30), price_pct=95.0))
+        assert store.price_velocity(
+            "FIFA World Cup 2026", "Morocco", "winner_no",
+            window=timedelta(hours=24), now=T0 + timedelta(hours=30),
+        ) is None
+
+        # two points at the SAME instant (zero span) -> None, not a div/0
+        store.record_snapshot(_snap(ts_utc=T0 + timedelta(hours=30), price_pct=94.0))
+        assert store.price_velocity(
+            "FIFA World Cup 2026", "Morocco", "winner_no",
+            window=timedelta(hours=1), now=T0 + timedelta(hours=30),
+        ) is None
+
+
 def test_resolve_rejects_bad_outcome_and_naive_ts():
     with pytest.raises(StorageError, match="outcome"):
         Resolve(tournament="t", team="A", market="winner_yes", outcome="won", ts_utc=T0)

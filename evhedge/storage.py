@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -361,6 +361,37 @@ class Storage:
             )
             for row in self._conn.execute(query, params)
         ]
+
+    def price_velocity(
+        self,
+        tournament: str,
+        team: str,
+        market: str,
+        window: timedelta,
+        now: Optional[datetime] = None,
+    ) -> Optional[float]:
+        """Price movement speed over the window, in percentage points per
+        hour: (newest - oldest) / hours between them, over the snapshots
+        inside ``[now - window, now]``.
+
+        Returns ``None`` -- an honest "don't know", never a guess -- when
+        the window holds fewer than 2 snapshots, or when they all share
+        one timestamp (zero span). Sign follows the market snapshotted:
+        a NEGATIVE velocity on a ``*_no`` market means the NO price is
+        falling, i.e. the team's chances are rising.
+        """
+        now = now or utcnow()
+        if now.tzinfo is None:
+            raise StorageError("price_velocity(now=...) must be timezone-aware")
+
+        rows = self.snapshots(tournament, team=team, market=market, since=now - window)
+        if len(rows) < 2:
+            return None
+        first, last = rows[0], rows[-1]
+        hours = (last.ts_utc - first.ts_utc).total_seconds() / 3600.0
+        if hours <= 0.0:
+            return None
+        return (last.price_pct - first.price_pct) / hours
 
     # -- scan passports -------------------------------------------------------
 

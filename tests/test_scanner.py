@@ -340,6 +340,48 @@ def test_hype_flag_present_only_for_recent_upset_teams():
     assert hype_flag(config, "TeamC") is None
 
 
+# --- hype v2: computed velocity wins, manual is the no-data fallback ------------
+
+def test_hype_assessment_computed_from_fast_falling_no():
+    from evhedge.scanner import hype_assessment
+
+    config = _four_team_config()
+    flag, source = hype_assessment(config, "TeamB", no_velocity_pp_per_hour=-1.7)
+    assert flag is not None
+    assert source == "computed"
+
+
+def test_hype_assessment_flat_velocity_overrides_manual_upset():
+    """A recent_upset entry contradicted by a flat price is stale news:
+    computed data wins whenever it exists."""
+    from evhedge.scanner import hype_assessment
+
+    config = _four_team_config(recent_upset={"TeamB"})
+    flag, source = hype_assessment(config, "TeamB", no_velocity_pp_per_hour=-0.2)
+    assert flag is None
+    assert source is None
+
+
+def test_hype_assessment_falls_back_to_manual_without_velocity():
+    from evhedge.scanner import hype_assessment
+
+    config = _four_team_config(recent_upset={"TeamB"})
+    flag, source = hype_assessment(config, "TeamB", no_velocity_pp_per_hour=None)
+    assert flag is not None
+    assert source == "manual"
+
+
+def test_scan_reports_hype_source():
+    config = _four_team_config(recent_upset={"TeamB"})
+    reports = scan(config, no_velocities_pp_per_hour={"TeamC": -2.5})
+
+    team_b = next(r for r in reports if r.team == "TeamB")  # no velocity -> manual
+    team_c = next(r for r in reports if r.team == "TeamC")  # fast fall -> computed
+    assert team_b.hype_source == "manual"
+    assert team_c.hype_source == "computed"
+    assert team_c.hype_flag is not None
+
+
 # --- LIQUIDITY --------------------------------------------------------------
 
 def test_check_liquidity_unknown_without_token_id():

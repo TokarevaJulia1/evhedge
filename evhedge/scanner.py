@@ -511,6 +511,37 @@ FAVORITE_PATTERN_TEXT = (
 )
 HYPE_FLAG_TEXT = "окно входа — часы; ноги будут дорожать с каждым апсетом"
 
+#: Hype v2 thresholds (DESIGN CHOICE: placeholder band, tune against real
+#: episodes once the snapshot DB accumulates a few). Velocity is measured
+#: on the team's NO market (see storage.price_velocity): NO falling
+#: faster than this many pp/hour = the market is repricing the team up
+#: RIGHT NOW = the entry window is closing.
+HYPE_VELOCITY_THRESHOLD_PP_PER_HOUR = 1.0
+#: Lookback window for the velocity computation (used by the CLI wiring).
+HYPE_VELOCITY_WINDOW_HOURS = 24.0
+
+
+def hype_assessment(
+    config: ScannerConfig, team: str, no_velocity_pp_per_hour: Optional[float] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """(flag, source) for the HYPE check.
+
+    Computed data WINS when it exists: if a velocity is supplied, the
+    decision is purely ``velocity <= -HYPE_VELOCITY_THRESHOLD_PP_PER_HOUR``
+    (NO price falling fast) -- even for a team hand-listed in
+    ``recent_upset`` (a manual flag contradicted by a flat price is stale
+    news, not hype). Only when velocity is None (no/too little snapshot
+    history -- an honest "don't know") does the manual ``recent_upset``
+    fallback apply. Source is "computed" or "manual" accordingly.
+    """
+    if no_velocity_pp_per_hour is not None:
+        if no_velocity_pp_per_hour <= -HYPE_VELOCITY_THRESHOLD_PP_PER_HOUR:
+            return HYPE_FLAG_TEXT, "computed"
+        return None, None
+    if team in config.recent_upset:
+        return HYPE_FLAG_TEXT, "manual"
+    return None, None
+
 
 def leg_profile_flag(model: TournamentModel, team: str, depth: int) -> Optional[str]:
     """Median KNOWN (market, not model/no_data) leg ask price across the
@@ -538,6 +569,8 @@ def leg_profile_flag(model: TournamentModel, team: str, depth: int) -> Optional[
 
 
 def hype_flag(config: ScannerConfig, team: str) -> Optional[str]:
+    """Manual-only HYPE check (the pre-velocity fallback); prefer
+    ``hype_assessment``, which also consumes a computed price velocity."""
     return HYPE_FLAG_TEXT if team in config.recent_upset else None
 
 
@@ -698,6 +731,9 @@ class CandidateReport:
     deadness_range: Optional[tuple[float, float]] = None
     p_stays_dead_range: Optional[tuple[float, float]] = None
     available_multiplier_range: Optional[tuple[float, float]] = None
+    # "computed" (price velocity) or "manual" (recent_upset fallback) when
+    # hype_flag is set; None otherwise. See hype_assessment.
+    hype_source: Optional[str] = None
 
 
 #: Verdict sort order for ``sort_candidates``. DESIGN CHOICE:
@@ -722,6 +758,7 @@ def scan(
     config: ScannerConfig,
     token_ids: Optional[dict[str, str]] = None,
     volumes: Optional[dict[str, float]] = None,
+    no_velocities_pp_per_hour: Optional[dict[str, float]] = None,
 ) -> list[CandidateReport]:
     """Scan every team priced below ``config.outright_threshold_pct`` that
     has a quoted NO price, and build a full ``CandidateReport`` for each.
@@ -735,12 +772,18 @@ def scan(
             follows.
         volumes: Optional team -> market volume in USD, reported alongside
             the (possibly unknown) executable-size check.
+        no_velocities_pp_per_hour: Optional team -> velocity of the team's
+            NO price in pp/hour (from ``storage.price_velocity``; negative
+            = NO falling = team rising). Drives the computed HYPE flag;
+            teams absent here fall back to the manual ``recent_upset``
+            check (see ``hype_assessment``).
 
     Returns:
         One ``CandidateReport`` per scanned team, in no particular order.
     """
     token_ids = token_ids or {}
     volumes = volumes or {}
+    no_velocities_pp_per_hour = no_velocities_pp_per_hour or {}
     reports = []
 
     for team, outright_pct in config.teams.items():
@@ -785,6 +828,10 @@ def scan(
             if len(verdicts) > 1:
                 fuel_verdict = INSUFFICIENT_DATA
 
+        hype, hype_source = hype_assessment(
+            config, team, no_velocities_pp_per_hour.get(team)
+        )
+
         reports.append(CandidateReport(
             team=team,
             liquidity=liquidity,
@@ -800,7 +847,7 @@ def scan(
             available_multiplier=fuel.available_multiplier,
             fuel_verdict=fuel_verdict,
             leg_profile_flag=leg_profile_flag(model, team, depth),
-            hype_flag=hype_flag(config, team),
+            hype_flag=hype,
             ev_lockin=econ.ev_lockin,
             ev_hold=econ.ev_hold,
             terminal_branch_pnl=econ.terminal_branch_pnl,
@@ -810,6 +857,7 @@ def scan(
             deadness_range=deadness_range,
             p_stays_dead_range=stays_dead_range,
             available_multiplier_range=available_range,
+            hype_source=hype_source,
         ))
 
     return reports
