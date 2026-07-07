@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Optional
 
 from evhedge.data_sources import polymarket as polymarket_ds
+from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.storage import PriceSnapshot, Resolve, Storage, utcnow
 
 #: Match-event markets whose outcomes are the two team names and whose
@@ -64,6 +65,7 @@ class CollectSummary:
     skipped_unresolved: int = 0   # closed but not cleanly 1/0 (e.g. Bo2 draw)
     skipped_price_range: int = 0  # price at exactly 0 or 100 -- unquotable as (0,100)
     skipped_live: int = 0         # match already live: pre-match price history ends here
+    book_fallback_to_board: int = 0  # verify_book requested but no usable book (error/empty side)
     labels: list[str] = field(default_factory=list)
 
 
@@ -95,6 +97,31 @@ def _is_placeholder(market: dict) -> bool:
     )
 
 
+def _resolve_price(
+    token_id: Optional[str], board_price_pct: float, verify_book: bool
+) -> tuple[float, Optional[float], Optional[float], str, bool]:
+    """Real bid/ask via the order book when asked for and available;
+    Gamma's board price otherwise.
+
+    Returns ``(price_pct, bid_pct, ask_pct, source, fell_back)``.
+    ``price_pct`` is the tradable buy price (= ``ask_pct``) when
+    ``source == "book"``; Gamma's display value otherwise. ``fell_back``
+    is True whenever ``verify_book`` was requested but a book snapshot
+    wasn't actually obtained (network error, or one side of the book
+    empty) -- counted in ``CollectSummary.book_fallback_to_board``.
+    """
+    if verify_book and token_id:
+        try:
+            book = polymarket_ds.fetch_order_book(token_id)
+            bid, ask = polymarket_ds.best_bid_ask(book)
+            if bid is not None and ask is not None:
+                return ask * 100.0, bid * 100.0, ask * 100.0, "book", False
+        except PolymarketAPIError:
+            pass
+        return board_price_pct, None, None, "board", True
+    return board_price_pct, None, None, "board", False
+
+
 # ---------------------------------------------------------------------------
 # Yes/No team boards (winner outright, region aggregate, ...)
 # ---------------------------------------------------------------------------
@@ -105,6 +132,7 @@ def collect_board(
     event_slug: str,
     market_label: str,
     ts_utc: Optional[datetime] = None,
+    verify_book: bool = False,
 ) -> CollectSummary:
     """Snapshot every traded Yes/No market of one Gamma event.
 
@@ -113,6 +141,18 @@ def collect_board(
     attached per side. Prices at exactly 0/100 are skipped and counted
     (they can't be represented in the (0, 100) snapshot range and carry
     no velocity information anyway).
+
+    Args:
+        verify_book: If True, fetch the real order book for each side's
+            token and record its best bid/ask (``source="book"``) instead
+            of Gamma's ``outcomePrices`` value. WITHOUT this, ``..._no``
+            is not an independent observation: Gamma's Yes/No pair sums
+            to exactly 100.0 by construction, so the "no" row is just
+            ``100 - yes``, carrying no additional information and no
+            spread. Falls back to the board value (counted in
+            ``book_fallback_to_board``) on a network error or an empty
+            book side. Default False to keep this function network-free
+            unless asked; the CLI (``evhedge pull``) defaults the flag on.
 
     Raises:
         CollectError: If the event doesn't exist.
@@ -137,8 +177,15 @@ def collect_board(
         team = market.get("groupItemTitle") or market.get("question", "?")
         prices = _market_prices(market)
         tokens = _market_tokens(market)
+        volume = _volume(market)
         for side, price, token_idx in (("yes", prices[0], 0), ("no", prices[1], 1)):
-            price_pct = price * 100.0
+            board_price_pct = price * 100.0
+            token = tokens[token_idx] if len(tokens) > token_idx else None
+            price_pct, bid_pct, ask_pct, source, fell_back = _resolve_price(
+                token, board_price_pct, verify_book
+            )
+            if fell_back:
+                summary.book_fallback_to_board += 1
             if not (0.0 < price_pct < 100.0):
                 summary.skipped_price_range += 1
                 continue
@@ -147,9 +194,12 @@ def collect_board(
                 team=team,
                 market=f"{market_label}_{side}",
                 price_pct=price_pct,
-                source="board",
+                bid_pct=bid_pct,
+                ask_pct=ask_pct,
+                volume_usd=volume,
+                source=source,
                 ts_utc=ts,
-                token_id=tokens[token_idx] if len(tokens) > token_idx else None,
+                token_id=token,
             ))
             summary.snapshots_written += 1
 
@@ -191,15 +241,20 @@ def collect_match_markets(
     title_filter: str,
     ts_utc: Optional[datetime] = None,
     start_date_min: Optional[str] = None,
+    verify_book: bool = False,
 ) -> CollectSummary:
     """Walk every match event under a Gamma tag whose event title contains
     ``title_filter`` (e.g. "Esports World Cup"), and record:
 
-    - OPEN "Match Winner" markets -> one ``leg`` snapshot: team A (first
-      outcome) vs counterparty B, A's board price. This is the series
-      price a future scanner leg check reads. Matches that have gone
-      LIVE are skipped (``skipped_live``): the pre-match series ends at
-      throw-in, in-play prices are not entry prices.
+    - OPEN "Match Winner" markets -> TWO ``leg`` snapshots: team A vs
+      counterparty B (A's price) AND team B vs counterparty A (B's price)
+      -- both directions, not just the first outcome. For a two-outcome
+      market B's board price is close to A's complement, but not exactly
+      it (unlike a Yes/No pair, these are two independently quoted team
+      tokens), so the mirror row is a real second observation, not a
+      derived one. Matches that have gone LIVE are skipped
+      (``skipped_live``): the pre-match series ends at throw-in, in-play
+      prices are not entry prices.
     - CLOSED result markets (series + per-game) -> two ``Resolve`` rows,
       market label ``result:<event_slug>:<market title>``: "yes" for the
       team whose side settled at 1, "no" for the other. A closed market
@@ -211,6 +266,12 @@ def collect_match_markets(
     week) whenever the tag has history: Gamma hard-rejects deep
     pagination over settled events (422, see
     ``data_sources.polymarket.fetch_tournament_markets``).
+
+    Args:
+        verify_book: If True, fetch each leg's real order book and record
+            its best bid/ask (``source="book"``) instead of the board
+            price -- same rationale and fallback behavior as
+            ``collect_board``'s ``verify_book``.
     """
     ts = ts_utc or utcnow()
     summary = CollectSummary(labels=[f"matches: tag={tag_slug!r} filter={title_filter!r}"])
@@ -243,18 +304,28 @@ def collect_match_markets(
                 if _event_is_live(event, ts):
                     summary.skipped_live += 1
                     continue
-                price_pct = prices[0] * 100.0
-                if not (0.0 < price_pct < 100.0):
-                    summary.skipped_price_range += 1
-                    continue
                 tokens = _market_tokens(market)
-                store.record_snapshot(PriceSnapshot(
-                    tournament=tournament, team=team_a, market="leg",
-                    price_pct=price_pct, source="board", ts_utc=ts,
-                    counterparty=team_b,
-                    token_id=tokens[0] if tokens else None,
-                ))
-                summary.snapshots_written += 1
+                volume = _volume(market)
+                for team_x, team_y, price, token_idx in (
+                    (team_a, team_b, prices[0], 0), (team_b, team_a, prices[1], 1)
+                ):
+                    board_price_pct = price * 100.0
+                    token = tokens[token_idx] if len(tokens) > token_idx else None
+                    price_pct, bid_pct, ask_pct, source, fell_back = _resolve_price(
+                        token, board_price_pct, verify_book
+                    )
+                    if fell_back:
+                        summary.book_fallback_to_board += 1
+                    if not (0.0 < price_pct < 100.0):
+                        summary.skipped_price_range += 1
+                        continue
+                    store.record_snapshot(PriceSnapshot(
+                        tournament=tournament, team=team_x, market="leg",
+                        price_pct=price_pct, bid_pct=bid_pct, ask_pct=ask_pct,
+                        volume_usd=volume, source=source, ts_utc=ts,
+                        counterparty=team_y, token_id=token,
+                    ))
+                    summary.snapshots_written += 1
                 continue
 
             # Closed: settle only on a clean 1/0.

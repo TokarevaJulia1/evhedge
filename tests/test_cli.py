@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from evhedge.cli import main
@@ -370,3 +371,81 @@ def test_resolve_command_round_trip(tmp_path):
         (resolve,) = store.resolves("FIFA World Cup 2026", team="Morocco")
         assert resolve.outcome == "no"
         assert resolve.note == "eliminated in QF"
+
+
+def test_pull_command_verify_book_reports_no_fallback(tmp_path, monkeypatch):
+    """winner_no must come from a real order book, not Gamma's forced
+    Yes/No complement -- the --verify-book default path."""
+    import json
+
+    event = {
+        "slug": "s", "title": "t",
+        "markets": [{
+            "groupItemTitle": "Norway", "outcomes": json.dumps(["Yes", "No"]),
+            "outcomePrices": json.dumps(["0.05", "0.95"]),
+            "clobTokenIds": json.dumps(["tokY", "tokN"]),
+            "volume": "5000",
+        }],
+    }
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_event_by_slug", lambda slug: event)
+
+    books = {
+        "tokY": OrderBook("tokY", bids=[BookLevel(0.04, 10)], asks=[BookLevel(0.06, 10)]),
+        "tokN": OrderBook("tokN", bids=[BookLevel(0.92, 10)], asks=[BookLevel(0.96, 10)]),
+    }
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book", lambda token_id: books[token_id],
+    )
+
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "pull", "--tournament", "T", "--board", "s:winner", "--db", str(db),
+    ])
+
+    assert result.exit_code == 0
+    assert "Book->board fallback" in result.output
+
+    from evhedge.storage import Storage
+    with Storage(db) as store:
+        (no,) = store.snapshots("T", team="Norway", market="winner_no")
+        assert no.source == "book"
+        assert no.ask_pct == pytest.approx(96.0)
+        (yes,) = store.snapshots("T", team="Norway", market="winner_yes")
+        # independently-quoted asks, not a forced 100 - yes complement
+        assert yes.ask_pct + no.ask_pct != pytest.approx(100.0)
+
+
+def test_pull_command_no_verify_book_uses_board_price(tmp_path, monkeypatch):
+    import json
+
+    event = {
+        "slug": "s", "title": "t",
+        "markets": [{
+            "groupItemTitle": "Norway", "outcomes": json.dumps(["Yes", "No"]),
+            "outcomePrices": json.dumps(["0.05", "0.95"]),
+            "clobTokenIds": json.dumps(["tokY", "tokN"]),
+            "volume": "5000",
+        }],
+    }
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_event_by_slug", lambda slug: event)
+
+    def fail_fetch_order_book(token_id):
+        raise AssertionError("fetch_order_book must not be called with --no-verify-book")
+
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book", fail_fetch_order_book,
+    )
+
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "pull", "--tournament", "T", "--board", "s:winner", "--no-verify-book", "--db", str(db),
+    ])
+
+    assert result.exit_code == 0
+    from evhedge.storage import Storage
+    with Storage(db) as store:
+        (no,) = store.snapshots("T", team="Norway", market="winner_no")
+        assert no.source == "board"
+        assert no.price_pct == pytest.approx(95.0)

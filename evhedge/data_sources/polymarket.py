@@ -199,6 +199,20 @@ def fetch_order_book(token_id: str) -> OrderBook:
     return OrderBook(token_id=token_id, bids=bids, asks=asks)
 
 
+def best_bid_ask(book: OrderBook) -> tuple[float | None, float | None]:
+    """Top-of-book (best bid, best ask), each ``None`` if that side is
+    empty.
+
+    This is the real, independently-traded bid/ask -- unlike a Gamma
+    ``outcomePrices`` display value, which for a binary Yes/No market is a
+    single derived number (Yes/No pair sums to exactly 1.0 by
+    construction), not two prices with an actual spread between them.
+    """
+    best_bid = max((lvl.price for lvl in book.bids), default=None)
+    best_ask = min((lvl.price for lvl in book.asks), default=None)
+    return best_bid, best_ask
+
+
 def executable_size(book: OrderBook, side: str, worst_price: float) -> tuple[float, float | None]:
     """How much USD is actually executable up to ``worst_price``, and at
     what volume-weighted average price -- the reason this function exists

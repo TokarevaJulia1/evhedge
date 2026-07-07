@@ -58,8 +58,23 @@ class PriceSnapshot:
         tournament: Tournament label, same string used in scanner configs.
         team: Team/market subject name.
         market: Market label -- see module docstring for conventions.
-        price_pct: Price in percent (scanner convention), in (0, 100).
-        source: "board" or "book".
+        price_pct: Price in percent (scanner convention), in (0, 100). The
+            tradable buy price (= ``ask_pct``) when ``source == "book"``;
+            Gamma's display value when ``source == "board"``.
+        source: "board" (Gamma's ``outcomePrices`` -- for a binary Yes/No
+            market this is a SINGLE derived number, not two independently
+            traded prices: every board snapshot pair sums to exactly 100.0
+            by construction, which is why it carries no spread information
+            at all) or "book" (real order-book best bid/ask via
+            ``data_sources.polymarket.fetch_order_book`` -- has a genuine,
+            usually non-complementary spread).
+        bid_pct: Best bid, in percent, when ``source == "book"``. None for
+            "board" snapshots (Gamma doesn't expose it).
+        ask_pct: Best ask, in percent, when ``source == "book"``. None for
+            "board" snapshots.
+        volume_usd: Market/event volume in USD at snapshot time, when
+            known. Without this, a price move and a single $20 trade in an
+            empty book look identical.
         ts_utc: Timezone-aware UTC timestamp of the observation.
         counterparty: Opponent name for ``market="leg"`` snapshots;
             None for outright/milestone markets.
@@ -75,6 +90,9 @@ class PriceSnapshot:
     ts_utc: datetime
     counterparty: Optional[str] = None
     token_id: Optional[str] = None
+    bid_pct: Optional[float] = None
+    ask_pct: Optional[float] = None
+    volume_usd: Optional[float] = None
     id: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -94,6 +112,22 @@ class PriceSnapshot:
                 f"would silently be off)"
             )
         self.ts_utc = self.ts_utc.astimezone(timezone.utc)
+        for label, value in (("bid_pct", self.bid_pct), ("ask_pct", self.ask_pct)):
+            if value is not None and not (0.0 < value < 100.0):
+                raise StorageError(
+                    f"PriceSnapshot({self.team!r}, {self.market!r}).{label} must be "
+                    f"in (0, 100), got {value}"
+                )
+        if self.bid_pct is not None and self.ask_pct is not None and self.ask_pct < self.bid_pct:
+            raise StorageError(
+                f"PriceSnapshot({self.team!r}, {self.market!r}): ask_pct ({self.ask_pct}) "
+                f"< bid_pct ({self.bid_pct}) -- a crossed/invalid book"
+            )
+        if self.volume_usd is not None and self.volume_usd < 0.0:
+            raise StorageError(
+                f"PriceSnapshot({self.team!r}, {self.market!r}).volume_usd must be >= 0, "
+                f"got {self.volume_usd}"
+            )
 
 
 def utcnow() -> datetime:
@@ -278,6 +312,16 @@ _MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_resolves_lookup ON resolves (tournament, team, market);
     """,
+    # v3 -> v4: real bid/ask + volume on price_snapshots. Board snapshots
+    # (Gamma outcomePrices) leave bid_pct/ask_pct NULL -- they were never
+    # two independently-traded prices to begin with (a binary market's
+    # Yes/No pair sums to exactly 100.0 by construction). Only "book"
+    # snapshots (data_sources.polymarket.fetch_order_book) populate them.
+    """
+    ALTER TABLE price_snapshots ADD COLUMN bid_pct REAL;
+    ALTER TABLE price_snapshots ADD COLUMN ask_pct REAL;
+    ALTER TABLE price_snapshots ADD COLUMN volume_usd REAL;
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -336,8 +380,8 @@ class Storage:
                 """
                 INSERT INTO price_snapshots
                     (ts_utc, tournament, team, market, price_pct, source,
-                     counterparty, token_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     counterparty, token_id, bid_pct, ask_pct, volume_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.ts_utc.isoformat(),
@@ -348,6 +392,9 @@ class Storage:
                     snapshot.source,
                     snapshot.counterparty,
                     snapshot.token_id,
+                    snapshot.bid_pct,
+                    snapshot.ask_pct,
+                    snapshot.volume_usd,
                 ),
             )
         snapshot.id = cursor.lastrowid
@@ -392,6 +439,9 @@ class Storage:
                 ts_utc=datetime.fromisoformat(row["ts_utc"]),
                 counterparty=row["counterparty"],
                 token_id=row["token_id"],
+                bid_pct=row["bid_pct"],
+                ask_pct=row["ask_pct"],
+                volume_usd=row["volume_usd"],
                 id=row["id"],
             )
             for row in self._conn.execute(query, params)

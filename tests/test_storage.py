@@ -47,6 +47,30 @@ def test_snapshot_normalizes_timestamp_to_utc():
     assert snap.ts_utc == T0
 
 
+def test_snapshot_rejects_out_of_range_bid_or_ask():
+    with pytest.raises(StorageError, match="bid_pct"):
+        _snap(bid_pct=0.0, ask_pct=50.0)
+    with pytest.raises(StorageError, match="ask_pct"):
+        _snap(bid_pct=50.0, ask_pct=100.0)
+
+
+def test_snapshot_rejects_crossed_book():
+    with pytest.raises(StorageError, match="crossed"):
+        _snap(bid_pct=60.0, ask_pct=40.0)
+
+
+def test_snapshot_rejects_negative_volume():
+    with pytest.raises(StorageError, match="volume_usd"):
+        _snap(volume_usd=-1.0)
+
+
+def test_snapshot_bid_ask_volume_default_to_none():
+    snap = _snap()
+    assert snap.bid_pct is None
+    assert snap.ask_pct is None
+    assert snap.volume_usd is None
+
+
 # --- Storage: round trip and persistence between opens ---------------------------
 
 def test_snapshot_round_trip(tmp_path):
@@ -61,7 +85,22 @@ def test_snapshot_round_trip(tmp_path):
         assert loaded.source == "board"
         assert loaded.ts_utc == T0
         assert loaded.token_id == "tok123"
-        assert loaded.id == row_id
+        assert loaded.bid_pct is None
+        assert loaded.ask_pct is None
+        assert loaded.volume_usd is None
+
+
+def test_snapshot_round_trip_with_book_fields(tmp_path):
+    db = tmp_path / "evhedge.db"
+    with Storage(db) as store:
+        store.record_snapshot(_snap(
+            source="book", bid_pct=95.5, ask_pct=97.0, volume_usd=12345.0,
+        ))
+        (loaded,) = store.snapshots("FIFA World Cup 2026", team="Morocco")
+        assert loaded.source == "book"
+        assert loaded.bid_pct == pytest.approx(95.5)
+        assert loaded.ask_pct == pytest.approx(97.0)
+        assert loaded.volume_usd == pytest.approx(12345.0)
 
 
 def test_memory_survives_between_opens(tmp_path):

@@ -550,12 +550,22 @@ def snapshot_command(config: Path, db_path: Path) -> None:
     show_default=True,
     help="Snapshot DB file (created if missing).",
 )
+@click.option(
+    "--verify-book/--no-verify-book",
+    default=True,
+    show_default=True,
+    help="Fetch real order-book bid/ask per side instead of trusting Gamma's "
+    "board price (which for a Yes/No pair is a single derived number, not an "
+    "independent second observation -- see collect.collect_board). Costs one "
+    "extra request per side; falls back to the board price on failure.",
+)
 def pull_command(
     tournament: str,
     boards: tuple[str, ...],
     matches_spec: Optional[str],
     matches_since: Optional[str],
     db_path: Path,
+    verify_book: bool,
 ) -> None:
     """Collect live Gamma board prices and match results into the DB."""
     if not boards and matches_spec is None:
@@ -576,10 +586,11 @@ def pull_command(
     try:
         with Storage(db_path) as store:
             for slug, label in parsed_boards:
-                summaries.append(collect_board(store, tournament, slug, label))
+                summaries.append(collect_board(store, tournament, slug, label, verify_book=verify_book))
             if matches_spec is not None:
                 summaries.append(collect_match_markets(
                     store, tournament, tag, title_filter, start_date_min=matches_since,
+                    verify_book=verify_book,
                 ))
     except (CollectError, PolymarketAPIError, StorageError) as e:
         error_console.print(f"Ошибка: {e}")
@@ -591,6 +602,7 @@ def pull_command(
     table.add_column("Снапшотов", justify="right")
     table.add_column("Резолвов", justify="right")
     table.add_column("Пропущено (плейсх./форма/нерешено/цена/лайв)", justify="right")
+    table.add_column("Book->board fallback", justify="right")
     for s in summaries:
         table.add_row(
             "; ".join(s.labels),
@@ -599,6 +611,7 @@ def pull_command(
             str(s.resolves_written),
             f"{s.skipped_placeholders}/{s.skipped_shape}/{s.skipped_unresolved}"
             f"/{s.skipped_price_range}/{s.skipped_live}",
+            str(s.book_fallback_to_board),
         )
     console.print(table)
 

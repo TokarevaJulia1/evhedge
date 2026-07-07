@@ -11,6 +11,7 @@ from evhedge.collect import (
     collect_board,
     collect_match_markets,
 )
+from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.storage import Storage
 
 
@@ -58,9 +59,74 @@ def test_collect_board_snapshots_yes_and_no_sides(tmp_path, monkeypatch):
         assert yandex_yes.price_pct == pytest.approx(22.5)
         assert yandex_yes.source == "board"
         assert yandex_yes.token_id == "tokY"
+        assert yandex_yes.volume_usd == pytest.approx(1000.0)
+        assert yandex_yes.bid_pct is None and yandex_yes.ask_pct is None
         (yandex_no,) = store.snapshots("EWC 2026 Dota 2", team="Team Yandex", market="winner_no")
         assert yandex_no.price_pct == pytest.approx(77.5)
         assert yandex_no.token_id == "tokN"
+        assert yandex_no.volume_usd == pytest.approx(1000.0)
+
+
+def test_collect_board_verify_book_uses_real_bid_ask(tmp_path, monkeypatch):
+    """winner_no must NOT just be 100 - yes: with verify_book=True, both
+    sides come from the real order book (which need not be complementary),
+    and source is "book", not "board"."""
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook
+
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_event_by_slug", lambda slug: WINNER_EVENT,
+    )
+
+    books = {
+        "tokY": OrderBook("tokY", bids=[BookLevel(0.215, 100)], asks=[BookLevel(0.225, 50)]),
+        "tokN": OrderBook("tokN", bids=[BookLevel(0.76, 100)], asks=[BookLevel(0.78, 50)]),
+    }
+
+    def fake_fetch_order_book(token_id):
+        return books[token_id]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_order_book", fake_fetch_order_book)
+
+    with Storage(tmp_path / "e.db") as store:
+        summary = collect_board(
+            store, "EWC 2026 Dota 2", "ewc-dota-2-winner", "winner", verify_book=True,
+        )
+        assert summary.book_fallback_to_board == 0
+
+        (yes,) = store.snapshots("EWC 2026 Dota 2", team="Team Yandex", market="winner_yes")
+        (no,) = store.snapshots("EWC 2026 Dota 2", team="Team Yandex", market="winner_no")
+
+        assert yes.source == "book"
+        assert yes.bid_pct == pytest.approx(21.5)
+        assert yes.ask_pct == pytest.approx(22.5)
+        assert yes.price_pct == pytest.approx(22.5)  # tradable buy price = ask
+
+        assert no.source == "book"
+        assert no.bid_pct == pytest.approx(76.0)
+        assert no.ask_pct == pytest.approx(78.0)
+        # yes.ask (22.5) + no.ask (78.0) != 100 -- the whole point of the fix
+        assert yes.ask_pct + no.ask_pct != pytest.approx(100.0)
+
+
+def test_collect_board_verify_book_falls_back_on_api_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_event_by_slug", lambda slug: WINNER_EVENT,
+    )
+
+    def fake_fetch_order_book(token_id):
+        raise PolymarketAPIError("network down")
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_order_book", fake_fetch_order_book)
+
+    with Storage(tmp_path / "e.db") as store:
+        summary = collect_board(
+            store, "EWC 2026 Dota 2", "ewc-dota-2-winner", "winner", verify_book=True,
+        )
+        # 2 teams x yes/no = 4 sides, all fell back
+        assert summary.book_fallback_to_board == 4
+        (yes,) = store.snapshots("EWC 2026 Dota 2", team="Team Yandex", market="winner_yes")
+        assert yes.source == "board"
+        assert yes.price_pct == pytest.approx(22.5)
 
 
 def test_collect_board_skips_unquotable_extremes(tmp_path, monkeypatch):
@@ -140,6 +206,36 @@ STARTED_MATCH = {
 }
 
 
+def test_collect_match_markets_verify_book_uses_real_bid_ask(tmp_path, monkeypatch):
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook
+
+    def fake_fetch(tag_slug, closed=False, start_date_min=None):
+        return [] if closed else [OPEN_MATCH]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_tournament_markets", fake_fetch)
+
+    books = {
+        "tokA": OrderBook("tokA", bids=[BookLevel(0.40, 100)], asks=[BookLevel(0.42, 50)]),
+        "tokB": OrderBook("tokB", bids=[BookLevel(0.57, 100)], asks=[BookLevel(0.60, 50)]),
+    }
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book", lambda token_id: books[token_id],
+    )
+
+    with Storage(tmp_path / "e.db") as store:
+        summary = collect_match_markets(
+            store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup", verify_book=True,
+        )
+        assert summary.book_fallback_to_board == 0
+
+        legs = {leg.team: leg for leg in store.snapshots("EWC 2026 Dota 2", market="leg")}
+        assert legs["Team Falcons"].source == "book"
+        assert legs["Team Falcons"].ask_pct == pytest.approx(42.0)
+        assert legs["BetBoom Team"].ask_pct == pytest.approx(60.0)
+        # both asks come from independently-quoted books -- no forced complement
+        assert legs["Team Falcons"].ask_pct + legs["BetBoom Team"].ask_pct != pytest.approx(100.0)
+
+
 def test_collect_match_markets_legs_and_resolves(tmp_path, monkeypatch):
     def fake_fetch(tag_slug, closed=False, start_date_min=None):
         return [CLOSED_MATCH] if closed else [OPEN_MATCH, OTHER_TOURNAMENT]
@@ -150,12 +246,23 @@ def test_collect_match_markets_legs_and_resolves(tmp_path, monkeypatch):
             store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup"
         )
 
-        # open Match Winner -> one leg snapshot, team A vs counterparty B
-        (leg,) = store.snapshots("EWC 2026 Dota 2", market="leg")
-        assert leg.team == "Team Falcons"
-        assert leg.counterparty == "BetBoom Team"
-        assert leg.price_pct == pytest.approx(41.5)
-        assert leg.token_id == "tokA"
+        # open Match Winner -> TWO leg snapshots, both directions.
+        legs = store.snapshots("EWC 2026 Dota 2", market="leg")
+        by_team = {leg.team: leg for leg in legs}
+        assert set(by_team) == {"Team Falcons", "BetBoom Team"}
+
+        falcons = by_team["Team Falcons"]
+        assert falcons.counterparty == "BetBoom Team"
+        assert falcons.price_pct == pytest.approx(41.5)
+        assert falcons.token_id == "tokA"
+        assert falcons.volume_usd == pytest.approx(1000.0)
+        assert falcons.source == "board"
+        assert falcons.bid_pct is None and falcons.ask_pct is None
+
+        betboom = by_team["BetBoom Team"]
+        assert betboom.counterparty == "Team Falcons"
+        assert betboom.price_pct == pytest.approx(58.5)
+        assert betboom.token_id == "tokB"
 
         # closed Game 1 -> resolves for both teams; drawn series -> skipped
         resolves = store.resolves("EWC 2026 Dota 2")
@@ -183,4 +290,5 @@ def test_collect_match_markets_skips_live_matches(tmp_path, monkeypatch):
 
         assert summary.skipped_live == 2
         legs = store.snapshots("EWC 2026 Dota 2", market="leg")
-        assert [l.team for l in legs] == ["Team Falcons"]  # only the pre-match one
+        # only the pre-match OPEN_MATCH produced legs (both directions)
+        assert {l.team for l in legs} == {"Team Falcons", "BetBoom Team"}

@@ -14,6 +14,7 @@ from evhedge.data_sources.polymarket import (
     PolymarketAPIError,
     _get,
     _get_paginated,
+    best_bid_ask,
     executable_size,
     fetch_event_by_slug,
     fetch_order_book,
@@ -143,6 +144,30 @@ def test_fetch_order_book_raises_on_unparseable_levels(monkeypatch):
     )
     with pytest.raises(PolymarketAPIError):
         fetch_order_book("token123")
+
+
+# --- best_bid_ask: real, independently-traded top-of-book -------------------
+
+def test_best_bid_ask_returns_top_of_book():
+    book = OrderBook(
+        token_id="t",
+        bids=[BookLevel(0.40, 100.0), BookLevel(0.35, 500.0)],
+        asks=[BookLevel(0.42, 200.0), BookLevel(0.44, 300.0)],
+    )
+    bid, ask = best_bid_ask(book)
+    assert bid == pytest.approx(0.40)
+    assert ask == pytest.approx(0.42)
+
+
+def test_best_bid_ask_none_for_empty_side():
+    book = OrderBook(token_id="t", bids=[BookLevel(0.40, 100.0)], asks=[])
+    bid, ask = best_bid_ask(book)
+    assert bid == pytest.approx(0.40)
+    assert ask is None
+
+
+def test_best_bid_ask_both_none_for_empty_book():
+    assert best_bid_ask(OrderBook(token_id="t")) == (None, None)
 
 
 # --- executable_size: the "board shows 2.4c, real asks start at 3.1c" case ---
