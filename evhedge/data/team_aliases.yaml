@@ -1,0 +1,23 @@
+# Team name aliases: canonical -> [known alternate spellings].
+#
+# Every entry here was found by actually diffing team names between the
+# winner board and the leg (match) markets of the SAME tournament in a
+# live snapshot database (data/ewc2026.db, EWC 2026 Dota 2, checked
+# 2026-07-07) -- not guessed. See CHANGELOG.md for the full audit: which
+# 24 winner-board names and 21 leg-market names were compared, and which
+# names were left OUT of this file because no confirmed match was found
+# (e.g. "ZEDI Esports", "Poor Rangers", "IC x Insanity" / "Inner Circle" --
+# the last pair looks plausible from the abbreviation but isn't confirmed,
+# so it's a suggest_aliases candidate, not a default entry).
+#
+# Canonical form chosen = the winner-board spelling (the board a scanner
+# config's `teams`/outright % is keyed by).
+
+"1W":
+  - "1win"
+
+"Aurora Gaming":
+  - "Aurora"
+
+"L1GA TEAM":
+  - "L1ga Team"

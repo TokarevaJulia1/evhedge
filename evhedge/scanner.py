@@ -71,6 +71,7 @@ from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.engine import compute_ev
 from evhedge.models import Bracket, MarketPrices, Stage, StrategyConfig
 from evhedge.power_model import pair_prob, strength
+from evhedge.team_aliases import canonical_name, load_default_aliases
 
 VALID_STAGE_TYPES = ("round_robin", "gauntlet", "single_elim")
 
@@ -908,21 +909,34 @@ def load_scanner_config(path: Union[str, Path]) -> ScannerConfig:
         for s in data["stages_meta"]
     ]
 
-    bracket = data.get("bracket")
+    # Canonicalize team names as early as possible -- the YAML can be
+    # written with any known alias; everything downstream (scan(),
+    # storage snapshots) works with the canonical form only.
+    alias_map = load_default_aliases()
+
+    def _canon(name: str) -> str:
+        return canonical_name(name, alias_map)
+
+    def _canon_bracket(node):
+        if node is None or isinstance(node, str):
+            return canonical_name(node, alias_map) if node is not None else None
+        return [_canon_bracket(node[0]), _canon_bracket(node[1])]
+
+    bracket = _canon_bracket(data.get("bracket"))
 
     leg_prices: dict[tuple[str, str], float] = {}
     for entry in data.get("leg_prices", []) or []:
         team_a, team_b = entry["teams"]
-        leg_prices[(team_a, team_b)] = float(entry["ask_pct"])
+        leg_prices[(_canon(team_a), _canon(team_b))] = float(entry["ask_pct"])
 
     return ScannerConfig(
         tournament=data["tournament"],
         stages_meta=stages_meta,
-        teams={k: float(v) for k, v in data["teams"].items()},
+        teams={_canon(k): float(v) for k, v in data["teams"].items()},
         bracket=bracket,
         target_market=data["target_market"],
-        no_prices={k: float(v) for k, v in (data.get("no_prices") or {}).items()},
+        no_prices={_canon(k): float(v) for k, v in (data.get("no_prices") or {}).items()},
         leg_prices=leg_prices,
-        recent_upset=set(data.get("recent_upset") or []),
+        recent_upset={_canon(t) for t in (data.get("recent_upset") or [])},
         outright_threshold_pct=float(data.get("outright_threshold_pct", DEFAULT_BOSS_THRESHOLD_PCT)),
     )

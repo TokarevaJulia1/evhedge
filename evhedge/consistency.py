@@ -43,9 +43,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from evhedge.config_io import ConfigError, _read_yaml_file
+from evhedge.team_aliases import canonical_name
 
 #: Mandatory caveat attached to EVERY result this module produces. Board
 #: prices are a display; only order-book asks (bids, for selling) are
@@ -148,7 +149,9 @@ class IdentityResult:
 
 
 def identity_check(
-    parent_market: tuple[str, float], member_markets: dict[str, float]
+    parent_market: tuple[str, float],
+    member_markets: dict[str, float],
+    alias_map: Optional[dict[str, str]] = None,
 ) -> IdentityResult:
     """Aggregate = sum of members: a parent market ("a CONCACAF team
     wins") over mutually-exclusive members must price as their sum; the
@@ -162,17 +165,38 @@ def identity_check(
     Args:
         parent_market: (name, YES ask in percent) of the aggregate.
         member_markets: member name -> YES ask in percent.
+        alias_map: Optional ``evhedge.team_aliases`` map (e.g. from
+            ``load_default_aliases()``) to canonicalize the parent and
+            member names before summing, so the same team spelled
+            differently between the aggregate and a member board doesn't
+            look like an incomplete mapping. None (default) skips
+            canonicalization.
 
     Raises:
-        ConsistencyError: Empty member mapping, or any price outside
-            (0, 100).
+        ConsistencyError: Empty member mapping, any price outside
+            (0, 100), or two distinct member names canonicalizing to the
+            same name (ambiguous -- summing would silently drop one).
     """
     parent_name, parent_yes = parent_market
+    parent_name = canonical_name(parent_name, alias_map)
     if not member_markets:
         raise ConsistencyError(f"identity_check({parent_name!r}): member_markets is empty")
     _validate_pct(f"parent {parent_name!r}", parent_yes)
+
+    canon_members: dict[str, float] = {}
+    raw_for_canon: dict[str, str] = {}
     for name, price in member_markets.items():
         _validate_pct(f"member_markets[{name!r}]", price)
+        canon = canonical_name(name, alias_map)
+        if canon in raw_for_canon:
+            raise ConsistencyError(
+                f"identity_check({parent_name!r}): member {name!r} and "
+                f"{raw_for_canon[canon]!r} both canonicalize to {canon!r} -- "
+                f"ambiguous duplicate, fix the input"
+            )
+        raw_for_canon[canon] = name
+        canon_members[canon] = price
+    member_markets = canon_members
 
     members_sum = sum(member_markets.values())
     diff = parent_yes - members_sum

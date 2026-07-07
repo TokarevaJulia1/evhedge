@@ -110,6 +110,22 @@ def test_identity_check_rejects_bad_inputs():
         identity_check(("Parent", 100.0), {"X": 8.8})
 
 
+def test_identity_check_canonicalizes_member_names_with_alias_map():
+    """A member spelled differently than the alias-map canonical must
+    still be summed correctly, so naming drift doesn't masquerade as a
+    mispricing."""
+    alias_map = {"1win": "1W", "1W": "1W"}
+    result = identity_check(("Parent", 9.4), {"1win": 8.5, "Other": 0.9}, alias_map=alias_map)
+    assert set(result.members_yes_pct) == {"1W", "Other"}
+    assert result.rich_side == "balanced"
+
+
+def test_identity_check_rejects_ambiguous_alias_collision():
+    alias_map = {"1win": "1W", "1W": "1W"}
+    with pytest.raises(ConsistencyError, match="ambiguous"):
+        identity_check(("Parent", 9.4), {"1win": 8.5, "1W": 0.9}, alias_map=alias_map)
+
+
 # --- vertical_check ------------------------------------------------------------
 
 def test_vertical_check_healthy_ladder_no_signal():

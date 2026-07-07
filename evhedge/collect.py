@@ -36,6 +36,7 @@ from typing import Optional
 from evhedge.data_sources import polymarket as polymarket_ds
 from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.storage import PriceSnapshot, Resolve, Storage, utcnow
+from evhedge.team_aliases import canonical_name, load_default_aliases
 
 #: Match-event markets whose outcomes are the two team names and whose
 #: result we archive. DESIGN CHOICE: series + per-game winners only;
@@ -86,6 +87,17 @@ def _volume(market: dict) -> float:
         return float(market.get("volume") or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _canon(raw: Optional[str], alias_map: dict[str, str]) -> tuple[Optional[str], Optional[str]]:
+    """Canonicalize a team name as early as possible (right where it comes
+    off the wire), returning ``(canonical, raw_if_different)`` --
+    ``raw_if_different`` is None when the source spelling already was
+    canonical, matching ``PriceSnapshot.raw_team``'s contract."""
+    if raw is None:
+        return None, None
+    canonical = canonical_name(raw, alias_map)
+    return canonical, (raw if raw != canonical else None)
 
 
 def _is_placeholder(market: dict) -> bool:
@@ -162,6 +174,7 @@ def collect_board(
         raise CollectError(f"событие {event_slug!r} не найдено в Gamma")
 
     ts = ts_utc or utcnow()
+    alias_map = load_default_aliases()
     summary = CollectSummary(labels=[f"{market_label}: {event.get('title', event_slug)}"])
 
     for market in event.get("markets", []):
@@ -174,7 +187,7 @@ def collect_board(
             summary.skipped_shape += 1
             continue
 
-        team = market.get("groupItemTitle") or market.get("question", "?")
+        team, raw_team = _canon(market.get("groupItemTitle") or market.get("question", "?"), alias_map)
         prices = _market_prices(market)
         tokens = _market_tokens(market)
         volume = _volume(market)
@@ -200,6 +213,7 @@ def collect_board(
                 source=source,
                 ts_utc=ts,
                 token_id=token,
+                raw_team=raw_team,
             ))
             summary.snapshots_written += 1
 
@@ -274,6 +288,7 @@ def collect_match_markets(
             ``collect_board``'s ``verify_book``.
     """
     ts = ts_utc or utcnow()
+    alias_map = load_default_aliases()
     summary = CollectSummary(labels=[f"matches: tag={tag_slug!r} filter={title_filter!r}"])
 
     events = polymarket_ds.fetch_tournament_markets(
@@ -296,7 +311,8 @@ def collect_match_markets(
             if len(outcomes) != 2 or "Yes" in outcomes or len(prices) != 2:
                 summary.skipped_shape += 1
                 continue
-            team_a, team_b = outcomes
+            team_a, raw_a = _canon(outcomes[0], alias_map)
+            team_b, raw_b = _canon(outcomes[1], alias_map)
 
             if not market.get("closed"):
                 if (market.get("groupItemTitle") or "") not in RESULT_MARKET_TITLES:
@@ -306,8 +322,8 @@ def collect_match_markets(
                     continue
                 tokens = _market_tokens(market)
                 volume = _volume(market)
-                for team_x, team_y, price, token_idx in (
-                    (team_a, team_b, prices[0], 0), (team_b, team_a, prices[1], 1)
+                for team_x, raw_x, team_y, price, token_idx in (
+                    (team_a, raw_a, team_b, prices[0], 0), (team_b, raw_b, team_a, prices[1], 1)
                 ):
                     board_price_pct = price * 100.0
                     token = tokens[token_idx] if len(tokens) > token_idx else None
@@ -323,7 +339,7 @@ def collect_match_markets(
                         tournament=tournament, team=team_x, market="leg",
                         price_pct=price_pct, bid_pct=bid_pct, ask_pct=ask_pct,
                         volume_usd=volume, source=source, ts_utc=ts,
-                        counterparty=team_y, token_id=token,
+                        counterparty=team_y, token_id=token, raw_team=raw_x,
                     ))
                     summary.snapshots_written += 1
                 continue

@@ -550,6 +550,41 @@ outright_threshold_pct: 10.0
     assert bracket_teams(config.bracket) == {"TeamA", "TeamB", "TeamC", "TeamD"}
 
 
+def test_load_scanner_config_canonicalizes_team_names(tmp_path, monkeypatch):
+    """A YAML written entirely in alias spellings must load with every
+    team name (teams/no_prices/leg_prices/bracket/recent_upset) already
+    canonicalized -- the whole point of canonicalizing as early as
+    possible, at config load time."""
+    alias_path = tmp_path / "aliases.yaml"
+    alias_path.write_text('"1W":\n  - "1win"\n', encoding="utf-8")
+    import evhedge.team_aliases as team_aliases_module
+    monkeypatch.setattr(team_aliases_module, "DEFAULT_ALIASES_PATH", alias_path)
+
+    yaml_text = """
+tournament: "EWC"
+stages_meta:
+  - {name: playoff, type: single_elim, match_format: bo3, hedge_suitable: true}
+teams: {"1win": 40.0, TeamB: 5.0}
+target_market: winner
+no_prices: {"1win": 91.0}
+bracket:
+  - "1win"
+  - TeamB
+leg_prices:
+  - {teams: ["1win", TeamB], ask_pct: 85.0}
+recent_upset: ["1win"]
+"""
+    path = tmp_path / "scanner_config.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+
+    config = load_scanner_config(path)
+    assert set(config.teams) == {"1W", "TeamB"}
+    assert set(config.no_prices) == {"1W"}
+    assert config.leg_prices[("1W", "TeamB")] == pytest.approx(85.0)
+    assert bracket_teams(config.bracket) == {"1W", "TeamB"}
+    assert config.recent_upset == {"1W"}
+
+
 def test_load_scanner_config_missing_required_field_raises(tmp_path):
     path = tmp_path / "bad.yaml"
     path.write_text("tournament: 'Test Cup'\nstages_meta: []\n", encoding="utf-8")

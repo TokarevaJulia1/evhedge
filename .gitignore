@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-data/
+/data/
 *.db
 *.egg-info/
 .pytest_cache/

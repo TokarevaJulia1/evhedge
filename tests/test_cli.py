@@ -449,3 +449,84 @@ def test_pull_command_no_verify_book_uses_board_price(tmp_path, monkeypatch):
         (no,) = store.snapshots("T", team="Norway", market="winner_no")
         assert no.source == "board"
         assert no.price_pct == pytest.approx(95.0)
+
+
+def test_aliases_suggest_command_prints_candidates(tmp_path):
+    from datetime import datetime, timezone
+
+    from evhedge.storage import PriceSnapshot, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_snapshot(PriceSnapshot(
+            tournament="T", team="Foo Gaming", market="winner_no",
+            price_pct=90.0, source="board", ts_utc=ts,
+        ))
+        store.record_snapshot(PriceSnapshot(
+            tournament="T", team="Foo", market="leg", price_pct=40.0,
+            source="board", ts_utc=ts, counterparty="Bar",
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["aliases", "suggest", "--db", str(db)])
+
+    assert result.exit_code == 0
+    assert "Foo Gaming" in result.output
+    assert "Foo" in result.output
+
+
+def test_aliases_suggest_command_no_candidates(tmp_path):
+    from datetime import datetime, timezone
+
+    from evhedge.storage import PriceSnapshot, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_snapshot(PriceSnapshot(
+            tournament="T", team="Zebra Squad", market="winner_no",
+            price_pct=90.0, source="board", ts_utc=ts,
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["aliases", "suggest", "--db", str(db)])
+
+    assert result.exit_code == 0
+    assert "Кандидатов не найдено" in result.output
+
+
+def test_aliases_check_command_reports_unmatched_names(tmp_path):
+    from datetime import datetime, timezone
+
+    from evhedge.storage import PriceSnapshot, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_snapshot(PriceSnapshot(
+            tournament="FIFA World Cup 2026", team="Morocco", market="winner_no",
+            price_pct=90.0, source="board", ts_utc=ts,
+        ))
+        store.record_snapshot(PriceSnapshot(
+            tournament="FIFA World Cup 2026", team="Some Ghost Team", market="leg",
+            price_pct=40.0, source="board", ts_utc=ts, counterparty="Morocco",
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["aliases", "check", str(WC2026_PATH), "--db", str(db)])
+
+    assert result.exit_code == 0
+    assert "OK" in result.output  # Morocco matched
+    assert "Some Ghost Team" in result.output  # in DB, not in config
+    assert "Несматченных имён" in result.output
+
+
+def test_aliases_check_command_missing_db_gives_clean_error(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "aliases", "check", str(WC2026_PATH), "--db", str(tmp_path / "does_not_exist.db"),
+    ])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output

@@ -16,7 +16,11 @@ place state lives, so three rules keep it honest:
 3. Schema changes ship as append-only migrations over ``PRAGMA
    user_version`` -- a database created by an older evhedge must open
    cleanly in a newer one (that's the whole point of memory BETWEEN
-   runs).
+   runs). Since v5, ``team``/``counterparty`` are canonical names (see
+   ``evhedge.team_aliases``): every writer canonicalizes before calling
+   ``record_snapshot`` so a team's outright history and its leg prices
+   join on the same key regardless of which spelling Polymarket happened
+   to use on which board.
 
 Snapshot ``market`` labels are free text by design, but stick to the
 conventions used across the project so velocity lookups match writes:
@@ -79,6 +83,12 @@ class PriceSnapshot:
         counterparty: Opponent name for ``market="leg"`` snapshots;
             None for outright/milestone markets.
         token_id: Optional CLOB token id the price was read from.
+        raw_team: The team name exactly as the source gave it, before
+            ``team_aliases.canonical_name`` ran, when that differs from
+            ``team``. None if the source name already was the canonical
+            form (or the row predates schema v5 and has never been
+            touched). Kept for debugging/backfilling the alias map, never
+            used as a lookup key.
         id: Database row id; None until stored.
     """
 
@@ -93,6 +103,7 @@ class PriceSnapshot:
     bid_pct: Optional[float] = None
     ask_pct: Optional[float] = None
     volume_usd: Optional[float] = None
+    raw_team: Optional[str] = None
     id: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -247,9 +258,24 @@ class ScanPassport:
     id: Optional[int] = None
 
 
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5: add ``raw_team`` and canonicalize every existing row's
+    ``team``/``counterparty`` (and ``resolves.team``) against the packaged
+    default alias map (see ``evhedge.team_aliases``). The actual rewrite
+    is ``team_aliases.recanonicalize`` -- also callable later, on demand,
+    if the alias map grows after this migration has already run once (see
+    ``Storage.recanonicalize_teams``)."""
+    from evhedge.team_aliases import load_default_aliases, recanonicalize  # avoid import cycle
+
+    conn.executescript("ALTER TABLE price_snapshots ADD COLUMN raw_team TEXT;")
+    recanonicalize(conn, load_default_aliases())
+
+
 #: Append-only migration scripts; index i upgrades user_version i -> i+1.
+#: Each entry is either a raw SQL script (str) or a callable(conn) for
+#: migrations that also need to rewrite data (see v4->v5).
 #: NEVER edit an entry that has shipped -- add a new one.
-_MIGRATIONS: list[str] = [
+_MIGRATIONS: list = [
     # v0 -> v1: price snapshots.
     """
     CREATE TABLE price_snapshots (
@@ -322,6 +348,16 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE price_snapshots ADD COLUMN ask_pct REAL;
     ALTER TABLE price_snapshots ADD COLUMN volume_usd REAL;
     """,
+    # v4 -> v5: canonical team names (evhedge.team_aliases). Polymarket
+    # names the same team differently across market types of the same
+    # tournament ("1W" on the winner board vs "1win" on match legs),
+    # which silently breaks any join between a team's outright history and
+    # its leg prices. This is a DATA migration, not just schema: every
+    # existing row's `team` is rewritten to its canonical form (against
+    # the packaged default alias map) and the original is preserved in
+    # the new `raw_team` column -- a Python function, not a SQL string,
+    # since it needs evhedge.team_aliases.canonical_name.
+    _migrate_v4_to_v5,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -368,7 +404,11 @@ class Storage:
             )
         for i in range(version, SCHEMA_VERSION):
             with self._conn:
-                self._conn.executescript(_MIGRATIONS[i])
+                step = _MIGRATIONS[i]
+                if callable(step):
+                    step(self._conn)
+                else:
+                    self._conn.executescript(step)
                 self._conn.execute(f"PRAGMA user_version = {i + 1}")
 
     # -- price snapshots ------------------------------------------------------
@@ -380,8 +420,8 @@ class Storage:
                 """
                 INSERT INTO price_snapshots
                     (ts_utc, tournament, team, market, price_pct, source,
-                     counterparty, token_id, bid_pct, ask_pct, volume_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     counterparty, token_id, bid_pct, ask_pct, volume_usd, raw_team)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.ts_utc.isoformat(),
@@ -395,6 +435,7 @@ class Storage:
                     snapshot.bid_pct,
                     snapshot.ask_pct,
                     snapshot.volume_usd,
+                    snapshot.raw_team,
                 ),
             )
         snapshot.id = cursor.lastrowid
@@ -442,10 +483,50 @@ class Storage:
                 bid_pct=row["bid_pct"],
                 ask_pct=row["ask_pct"],
                 volume_usd=row["volume_usd"],
+                raw_team=row["raw_team"],
                 id=row["id"],
             )
             for row in self._conn.execute(query, params)
         ]
+
+    def distinct_team_names(self, tournament: Optional[str] = None) -> list[str]:
+        """Every distinct name seen as either ``team`` or ``counterparty``
+        in ``price_snapshots``, optionally scoped to one tournament --
+        the raw-name universe ``team_aliases.suggest_aliases`` and the
+        `evhedge aliases` CLI audit against."""
+        query = "SELECT team AS name FROM price_snapshots"
+        params: list = []
+        if tournament is not None:
+            query += " WHERE tournament = ?"
+            params.append(tournament)
+        query += " UNION SELECT counterparty AS name FROM price_snapshots WHERE counterparty IS NOT NULL"
+        if tournament is not None:
+            query += " AND tournament = ?"
+            params.append(tournament)
+        return sorted({row["name"] for row in self._conn.execute(query, params)})
+
+    def recanonicalize_teams(self, alias_map: Optional[dict] = None) -> dict:
+        """Re-apply team name canonicalization to every row already in
+        this database (``team_aliases.recanonicalize``) -- for when the
+        alias map has grown SINCE this database's v4->v5 migration
+        already ran once (a schema migration only ever canonicalizes
+        against the alias map that existed at that moment; new entries
+        added later don't retroactively apply on their own).
+
+        Args:
+            alias_map: Defaults to ``team_aliases.load_default_aliases()``
+                if omitted.
+
+        Returns:
+            Counts of rows actually changed per column -- see
+            ``team_aliases.recanonicalize``.
+        """
+        from evhedge.team_aliases import load_default_aliases, recanonicalize
+
+        if alias_map is None:
+            alias_map = load_default_aliases()
+        with self._conn:
+            return recanonicalize(self._conn, alias_map)
 
     def price_velocity(
         self,

@@ -43,6 +43,7 @@ from evhedge.ranking import load_configs_from_dir, rank_teams
 from evhedge.scanner import (
     HYPE_VELOCITY_WINDOW_HOURS,
     ScannerError,
+    bracket_teams,
     load_scanner_config,
     scan,
     sort_candidates,
@@ -55,6 +56,7 @@ from evhedge.storage import (
     no_market_label,
     utcnow,
 )
+from evhedge.team_aliases import suggest_aliases
 
 console = Console(width=120)
 error_console = Console(width=120, stderr=True, style="bold red")
@@ -708,6 +710,102 @@ def check_command(config: Path) -> None:
                 warn_console.print(f"  {r.team}: {line}")
 
     warn_console.print(VERIFY_BOOK_CAVEAT)
+
+
+@main.group("aliases")
+def aliases_group() -> None:
+    """Team name alias tools: discover discrepancies, sanity-check a
+    scanner config against a snapshot DB before a live scan."""
+
+
+@aliases_group.command("suggest")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB to scan for name discrepancies.",
+)
+@click.option("--tournament", default=None, help="Limit to one tournament's names.")
+def aliases_suggest_command(db_path: Path, tournament: Optional[str]) -> None:
+    """Suggest candidate team-name aliases from names seen in the DB.
+
+    Never merges anything -- only proposes candidates for
+    evhedge/data/team_aliases.yaml (or a project-local override) after a
+    human confirms them.
+    """
+    try:
+        candidates = suggest_aliases(db_path, tournament)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if not candidates:
+        console.print("Кандидатов не найдено.")
+        return
+
+    table = Table(title="Кандидаты на алиасы (только предложены, не склеены)")
+    table.add_column("Имя A")
+    table.add_column("Имя B")
+    table.add_column("Score", justify="right")
+    for a, b, score in candidates:
+        table.add_row(a, b, f"{score:.2f}")
+    console.print(table)
+
+
+@aliases_group.command("check")
+@click.argument("config", type=click.Path(path_type=Path))
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB to check the config's team names against.",
+)
+def aliases_check_command(config: Path, db_path: Path) -> None:
+    """Pre-flight: compare CONFIG.yaml's (canonicalized) team names
+    against names already seen in --db, for the same tournament.
+
+    Run this before a live scan (e.g. the EWC decision window) to catch
+    naming gaps while there's still time to fix them, instead of finding
+    out from a silently-empty join.
+    """
+    try:
+        scanner_config = load_scanner_config(config)
+    except (ConfigError, ScannerError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    config_names = set(scanner_config.teams)
+    if scanner_config.bracket is not None:
+        config_names |= bracket_teams(scanner_config.bracket)
+
+    if not db_path.exists():
+        error_console.print(f"Ошибка: файл БД {db_path} не найден")
+        sys.exit(1)
+
+    try:
+        with Storage(db_path) as store:
+            db_names = set(store.distinct_team_names(scanner_config.tournament))
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    only_in_config = sorted(config_names - db_names)
+    only_in_db = sorted(db_names - config_names)
+    matched = sorted(config_names & db_names)
+
+    table = Table(title=f"aliases check — {scanner_config.tournament}")
+    table.add_column("Команда")
+    table.add_column("Статус")
+    for name in matched:
+        table.add_row(name, "OK — есть и в конфиге, и в БД")
+    for name in only_in_config:
+        table.add_row(name, "нет в БД")
+    for name in only_in_db:
+        table.add_row(name, "нет в конфиге")
+    console.print(table)
+
+    if only_in_config or only_in_db:
+        warn_console.print(
+            f"Несматченных имён: {len(only_in_config)} только в конфиге, "
+            f"{len(only_in_db)} только в БД -- проверьте team_aliases.yaml "
+            f"или сам конфиг перед боевым сканом."
+        )
 
 
 if __name__ == "__main__":
