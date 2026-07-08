@@ -358,6 +358,23 @@ _MIGRATIONS: list = [
     # the new `raw_team` column -- a Python function, not a SQL string,
     # since it needs evhedge.team_aliases.canonical_name.
     _migrate_v4_to_v5,
+    # v5 -> v6: dedup resolves. Nothing enforced (team, market) to resolve
+    # once per tournament, so a poller re-observing an already-closed
+    # market on every cycle (e.g. ewc_watch.bat, 15-min interval) wrote a
+    # fresh row every time -- 2,566 rows for 56 actual outcomes on the
+    # live EWC database. Natural key is (tournament, team, market), NOT
+    # (team, market, outcome): outcome is the resolved VALUE, not part of
+    # the identity, and dropping tournament would wrongly collide same-
+    # named teams across different tournaments. Existing duplicates are
+    # collapsed to the earliest row (MIN(id)) per key before the unique
+    # index is created, since CREATE UNIQUE INDEX fails outright on a
+    # table that already has duplicates.
+    """
+    DELETE FROM resolves WHERE id NOT IN (
+        SELECT MIN(id) FROM resolves GROUP BY tournament, team, market
+    );
+    CREATE UNIQUE INDEX idx_resolves_unique ON resolves (tournament, team, market);
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -651,15 +668,42 @@ class Storage:
     # -- resolves ---------------------------------------------------------------
 
     def record_resolve(self, resolve: Resolve) -> int:
-        """Store one market resolution; returns its row id."""
+        """Store one market resolution. Idempotent on (tournament, team,
+        market) -- a market resolves once; a poller re-observing an
+        already-closed market on every cycle (e.g. ewc_watch.bat) must
+        not pile up a fresh row every time. Returns the EXISTING row's id
+        (unchanged) if this exact (tournament, team, market) was already
+        recorded with the same outcome.
+
+        Raises:
+            StorageError: If (tournament, team, market) was already
+                recorded with a DIFFERENT outcome -- a market resolving
+                two different ways is a genuine data problem, not
+                something to silently dedupe away.
+        """
         with self._conn:
             cursor = self._conn.execute(
-                "INSERT INTO resolves (ts_utc, tournament, team, market, outcome, note)"
+                "INSERT OR IGNORE INTO resolves (ts_utc, tournament, team, market, outcome, note)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (resolve.ts_utc.isoformat(), resolve.tournament, resolve.team,
                  resolve.market, resolve.outcome, resolve.note),
             )
-        resolve.id = cursor.lastrowid
+            if cursor.rowcount == 1:
+                resolve.id = cursor.lastrowid
+                return resolve.id
+
+            existing = self._conn.execute(
+                "SELECT id, outcome FROM resolves WHERE tournament = ? AND team = ? AND market = ?",
+                (resolve.tournament, resolve.team, resolve.market),
+            ).fetchone()
+
+        if existing["outcome"] != resolve.outcome:
+            raise StorageError(
+                f"Resolve({resolve.team!r}, {resolve.market!r}) already resolved as "
+                f"{existing['outcome']!r}, now reported as {resolve.outcome!r} -- "
+                f"conflicting data, not deduped"
+            )
+        resolve.id = existing["id"]
         return resolve.id
 
     def resolves(

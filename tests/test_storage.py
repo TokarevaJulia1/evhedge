@@ -337,3 +337,88 @@ def test_resolve_rejects_bad_outcome_and_naive_ts():
     with pytest.raises(StorageError, match="timezone-aware"):
         Resolve(tournament="t", team="A", market="winner_yes", outcome="yes",
                 ts_utc=datetime(2026, 7, 6))
+
+
+# --- resolve dedup (schema v6) -----------------------------------------------
+
+def test_record_resolve_is_idempotent_on_same_outcome(tmp_path):
+    """A poller re-observing an already-closed market on every cycle must
+    not pile up a fresh row every time (the ewc_watch.bat 15-min bug:
+    2,566 rows for 56 actual outcomes)."""
+    with Storage(tmp_path / "e.db") as store:
+        first_id = store.record_resolve(Resolve(
+            tournament="T", team="Morocco", market="winner_no", outcome="no", ts_utc=T0,
+        ))
+        second_id = store.record_resolve(Resolve(
+            tournament="T", team="Morocco", market="winner_no", outcome="no",
+            ts_utc=T0 + timedelta(minutes=15),
+        ))
+
+        assert second_id == first_id
+        assert len(store.resolves("T", team="Morocco", market="winner_no")) == 1
+
+
+def test_record_resolve_conflicting_outcome_raises(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        store.record_resolve(Resolve(
+            tournament="T", team="Morocco", market="winner_no", outcome="no", ts_utc=T0,
+        ))
+        with pytest.raises(StorageError, match="conflicting"):
+            store.record_resolve(Resolve(
+                tournament="T", team="Morocco", market="winner_no", outcome="yes",
+                ts_utc=T0 + timedelta(minutes=15),
+            ))
+        # the original row must survive untouched
+        (resolve,) = store.resolves("T", team="Morocco", market="winner_no")
+        assert resolve.outcome == "no"
+
+
+def test_record_resolve_same_team_market_different_tournament_is_not_a_duplicate(tmp_path):
+    with Storage(tmp_path / "e.db") as store:
+        store.record_resolve(Resolve(
+            tournament="T1", team="Falcons", market="winner_no", outcome="no", ts_utc=T0,
+        ))
+        store.record_resolve(Resolve(
+            tournament="T2", team="Falcons", market="winner_no", outcome="yes", ts_utc=T0,
+        ))
+        assert len(store.resolves("T1", team="Falcons")) == 1
+        assert len(store.resolves("T2", team="Falcons")) == 1
+
+
+def test_v5_to_v6_migration_dedups_existing_resolve_rows(tmp_path):
+    """Simulates a v5 database with 3 duplicate resolve rows for the same
+    (tournament, team, market) -- exactly the shape the live watcher bug
+    produced -- and checks the migration collapses them to one and the
+    unique index is actually enforced afterward."""
+    import sqlite3
+
+    from evhedge.storage import _MIGRATIONS, SCHEMA_VERSION
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    for i in range(5):  # v0 -> v5
+        step = _MIGRATIONS[i]
+        if callable(step):
+            step(conn)
+        else:
+            conn.executescript(step)
+    for minute in (0, 15, 30):
+        conn.execute(
+            "INSERT INTO resolves (ts_utc, tournament, team, market, outcome, note)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ((T0 + timedelta(minutes=minute)).isoformat(), "EWC", "Falcons", "winner_no", "no", None),
+        )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+    with Storage(db) as store:
+        (version,) = store._conn.execute("PRAGMA user_version").fetchone()
+        assert version == SCHEMA_VERSION
+        assert len(store.resolves("EWC", team="Falcons", market="winner_no")) == 1
+
+        # the unique index must actually be in place now, not just a one-time cleanup
+        with pytest.raises(StorageError, match="conflicting"):
+            store.record_resolve(Resolve(
+                tournament="EWC", team="Falcons", market="winner_no", outcome="yes", ts_utc=T0,
+            ))
