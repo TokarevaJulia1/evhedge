@@ -21,3 +21,28 @@
 
 "L1GA TEAM":
   - "L1ga Team"
+
+# Confirmed 2026-07-10 against data/ewc2026.db (EWC 2026 Dota 2, group
+# stage). Both were previously left OUT as unconfirmed suggest_aliases
+# candidates -- now proven structurally: the two spellings' snapshot/
+# resolve windows never overlap in time or market type, and each side's
+# game/match count matches what's expected for one team's group-stage
+# slot exactly (see CHANGELOG.md for the full evidence).
+
+# Winner board only ever said "IC x Insanity"; leg markets and resolves
+# only ever said "Inner Circle" (0 rows under "IC x Insanity" in
+# resolves) -- same team, canon = board spelling per the rule above.
+"IC x Insanity":
+  - "Inner Circle"
+
+# slot-substitution EWC2026 group A, склейка осознанная: winner board
+# always said "Poor Rangers"; ZEDI Esports' leg snapshots end 2026-07-07
+# and Poor Rangers' begin 2026-07-07 (non-overlapping), and ZEDI's 2
+# resolved maps (0-2) + Poor Rangers' 4 resolved maps (1-3) sum to
+# exactly 6 -- one full group-A slot's map count after 3 rounds. There is
+# no "replace the team in this slot" mechanism in this codebase, and
+# building one for 2 maps of history isn't worth it -- this alias is a
+# deliberate merge of the SLOT's history, not a claim these are the same
+# roster.
+"Poor Rangers":
+  - "ZEDI Esports"

@@ -20,10 +20,13 @@ apply them.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional, Union
 
 from evhedge.config_io import ConfigError, _read_yaml_file
+
+logger = logging.getLogger(__name__)
 
 #: Packaged default alias map -- confirmed, real discrepancies only (see
 #: the file itself and the module's shipping commit for how each entry was
@@ -144,6 +147,15 @@ def recanonicalize(conn, alias_map: dict[str, str]) -> dict[str, int]:
     spelling ever observed for that row, not whatever it happened to be
     just before this particular call.
 
+    ``resolves`` has a UNIQUE index on ``(tournament, team, market)``
+    (schema v6+): renaming a row's ``team`` to its canonical form can
+    collide with an already-canonical row for the same
+    ``(tournament, market)`` (e.g. both the old and new spelling resolved
+    the same market before this alias existed). On collision, the
+    EXISTING canonical row is kept as-is and the row being renamed is
+    DELETED as a duplicate instead of updated -- logged at WARNING, never
+    a crash, and no other row is touched.
+
     Args:
         conn: An open sqlite3 connection to a database whose schema
             already has ``price_snapshots.raw_team`` (schema v5+).
@@ -152,10 +164,16 @@ def recanonicalize(conn, alias_map: dict[str, str]) -> dict[str, int]:
 
     Returns:
         ``{"price_snapshots.team": n, "price_snapshots.counterparty": n,
-        "resolves.team": n}`` -- how many rows were actually changed per
-        column (not merely visited).
+        "resolves.team": n, "resolves.duplicates_dropped": n}`` -- how
+        many rows were actually changed (or, for the last key, dropped as
+        a UNIQUE collision) per column, not merely visited.
     """
-    counts = {"price_snapshots.team": 0, "price_snapshots.counterparty": 0, "resolves.team": 0}
+    counts = {
+        "price_snapshots.team": 0,
+        "price_snapshots.counterparty": 0,
+        "resolves.team": 0,
+        "resolves.duplicates_dropped": 0,
+    }
 
     for row_id, team, raw_team in conn.execute(
         "SELECT id, team, raw_team FROM price_snapshots"
@@ -179,11 +197,31 @@ def recanonicalize(conn, alias_map: dict[str, str]) -> dict[str, int]:
             )
             counts["price_snapshots.counterparty"] += 1
 
-    for row_id, team in conn.execute("SELECT id, team FROM resolves").fetchall():
+    for row_id, tournament, team, market in conn.execute(
+        "SELECT id, tournament, team, market FROM resolves"
+    ).fetchall():
         canon = canonical_name(team, alias_map)
-        if canon != team:
-            conn.execute("UPDATE resolves SET team = ? WHERE id = ?", (canon, row_id))
-            counts["resolves.team"] += 1
+        if canon == team:
+            continue
+
+        collision = conn.execute(
+            "SELECT id FROM resolves WHERE tournament = ? AND team = ? AND market = ? AND id != ?",
+            (tournament, canon, market, row_id),
+        ).fetchone()
+        if collision is not None:
+            # idx_resolves_unique(tournament, team, market) already has a
+            # canonical row for this slot -- keep it, drop this duplicate.
+            conn.execute("DELETE FROM resolves WHERE id = ?", (row_id,))
+            logger.warning(
+                "recanonicalize: dropped duplicate resolves row id=%s (team=%r -> %r, "
+                "tournament=%r, market=%r) -- canonical row id=%s already exists",
+                row_id, team, canon, tournament, market, collision[0],
+            )
+            counts["resolves.duplicates_dropped"] += 1
+            continue
+
+        conn.execute("UPDATE resolves SET team = ? WHERE id = ?", (canon, row_id))
+        counts["resolves.team"] += 1
 
     return counts
 
