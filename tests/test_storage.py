@@ -422,3 +422,49 @@ def test_v5_to_v6_migration_dedups_existing_resolve_rows(tmp_path):
             store.record_resolve(Resolve(
                 tournament="EWC", team="Falcons", market="winner_no", outcome="yes", ts_utc=T0,
             ))
+
+
+def test_v6_to_v7_migration_creates_predictions_table_and_keeps_data(tmp_path):
+    """Simulates a v6 database with existing snapshot/resolve data and
+    checks the migration adds ``predictions`` without touching anything
+    else, and that re-running (no-op, already at SCHEMA_VERSION) is safe."""
+    import sqlite3
+
+    from evhedge.storage import _MIGRATIONS, Prediction, SCHEMA_VERSION
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    for i in range(6):  # v0 -> v6
+        step = _MIGRATIONS[i]
+        if callable(step):
+            step(conn)
+        else:
+            conn.executescript(step)
+    conn.execute(
+        "INSERT INTO resolves (ts_utc, tournament, team, market, outcome, note)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (T0.isoformat(), "EWC", "Falcons", "winner_no", "no", None),
+    )
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    conn.close()
+
+    with Storage(db) as store:
+        (version,) = store._conn.execute("PRAGMA user_version").fetchone()
+        assert version == SCHEMA_VERSION == 7
+
+        # pre-existing data untouched
+        assert len(store.resolves("EWC", team="Falcons", market="winner_no")) == 1
+
+        # predictions table is usable
+        store.record_prediction(Prediction(
+            tournament="EWC", team="Falcons", market="winner_no",
+            ts_utc=T0, p_model=0.1,
+        ))
+        assert len(store.predictions(tournament="EWC")) == 1
+
+    # idempotent: re-opening an already-migrated database is a no-op
+    with Storage(db) as store:
+        (version,) = store._conn.execute("PRAGMA user_version").fetchone()
+        assert version == SCHEMA_VERSION
+        assert len(store.predictions(tournament="EWC")) == 1

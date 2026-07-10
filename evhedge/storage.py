@@ -258,6 +258,142 @@ class ScanPassport:
     id: Optional[int] = None
 
 
+@dataclass
+class Prediction:
+    """A forecast fixed BEFORE a market resolves: model probability,
+    Polymarket book, and Pinnacle devig range, all captured at one
+    moment. IMMUTABLE once recorded -- see ``Storage.record_prediction``.
+
+    ``market`` uses the same labels as ``Resolve.market`` (see the module
+    docstring); scoring is a plain JOIN on (tournament, team, market).
+
+    Units: p_market_bid/p_market_ask/p_pin_low/p_pin_high are 0..1
+    FRACTIONS, not percent -- deliberately different from
+    ``PriceSnapshot.price_pct`` (0..100), because they come straight out
+    of ``data_sources.polymarket.best_bid_ask`` and
+    ``data_sources.pinnacle.devig_range``, both of which already work in
+    0..1, and this module shouldn't invent a conversion those callers
+    don't need.
+
+    Attributes:
+        p_model: power_model probability, None if the model didn't apply
+            to this pair (see power_model.py's calibration limits).
+        p_market_bid/p_market_ask: Polymarket YES order-book best
+            bid/ask at fixation time (from the BOOK, not the display
+            board -- see the PROJECT RULE in data_sources/polymarket.py).
+            Either both set or both None.
+        p_pin_low/p_pin_high: ``data_sources.pinnacle.devig_range``
+            bracket for this team's outcome, None if no Pinnacle odds
+            were entered. Either both set or both None.
+        outcome/outcome_ts: Filled in by ``Storage.score_predictions``
+            (a JOIN against ``resolves``), NEVER at prediction time and
+            never touched by ``record_prediction`` -- this is the one
+            exception to immutability: it's a cache of "this forecast is
+            now scoreable", not a change to the forecast itself.
+        note: Free text.
+    """
+
+    tournament: str
+    team: str
+    market: str
+    ts_utc: datetime
+    p_model: Optional[float] = None
+    p_market_bid: Optional[float] = None
+    p_market_ask: Optional[float] = None
+    p_pin_low: Optional[float] = None
+    p_pin_high: Optional[float] = None
+    note: Optional[str] = None
+    outcome: Optional[str] = None
+    outcome_ts: Optional[datetime] = None
+    id: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.ts_utc.tzinfo is None:
+            raise StorageError(
+                f"Prediction({self.team!r}, {self.market!r}).ts_utc must be timezone-aware"
+            )
+        self.ts_utc = self.ts_utc.astimezone(timezone.utc)
+
+        for label, value in (
+            ("p_model", self.p_model),
+            ("p_market_bid", self.p_market_bid), ("p_market_ask", self.p_market_ask),
+            ("p_pin_low", self.p_pin_low), ("p_pin_high", self.p_pin_high),
+        ):
+            if value is not None and not (0.0 < value < 1.0):
+                raise StorageError(
+                    f"Prediction({self.team!r}, {self.market!r}).{label} must be "
+                    f"in (0, 1), got {value}"
+                )
+        if self.p_pin_low is not None and self.p_pin_high is not None:
+            if self.p_pin_high < self.p_pin_low:
+                raise StorageError(
+                    f"Prediction({self.team!r}, {self.market!r}): p_pin_high "
+                    f"({self.p_pin_high}) < p_pin_low ({self.p_pin_low})"
+                )
+        if self.outcome is not None and self.outcome not in RESOLVE_OUTCOMES:
+            raise StorageError(
+                f"Prediction({self.team!r}, {self.market!r}).outcome must be one of "
+                f"{RESOLVE_OUTCOMES} or None, got {self.outcome!r}"
+            )
+        if self.outcome_ts is not None:
+            if self.outcome_ts.tzinfo is None:
+                raise StorageError(
+                    f"Prediction({self.team!r}, {self.market!r}).outcome_ts must be "
+                    f"timezone-aware"
+                )
+            self.outcome_ts = self.outcome_ts.astimezone(timezone.utc)
+
+
+@dataclass
+class ScoredPrediction:
+    """One prediction joined against its (now known) resolve."""
+
+    prediction: Prediction
+    outcome: str
+    y: int   # 1 if outcome == "yes" else 0
+    brier_model: Optional[float]
+    brier_market: Optional[float]
+    brier_pin_mid: Optional[float]
+    pin_range_hit: Optional[bool]   # p_model in [p_pin_low, p_pin_high]; None if not checkable
+
+
+@dataclass
+class ScoreReport:
+    """Output of ``Storage.score_predictions``.
+
+    Each ``mean_brier_*``/``n_*`` pair is computed only over the scored
+    predictions where that particular source's inputs were present --
+    the three sources don't necessarily share the same N. ``pending``
+    (no resolve yet) is never part of any metric here, only listed.
+    """
+
+    tournament: Optional[str]
+    scored: list[ScoredPrediction]
+    pending: list[Prediction]
+    n: int
+    n_model: int
+    mean_brier_model: Optional[float]
+    n_market: int
+    mean_brier_market: Optional[float]
+    n_pin: int
+    mean_brier_pin_mid: Optional[float]
+    delta_model_minus_market: Optional[float]   # positive = market beat model
+    n_range_checkable: int
+    pin_range_hit_rate: Optional[float]
+
+
+def _row_to_prediction(row: sqlite3.Row) -> Prediction:
+    return Prediction(
+        tournament=row["tournament"], team=row["team"], market=row["market"],
+        ts_utc=datetime.fromisoformat(row["ts_utc"]),
+        p_model=row["p_model"], p_market_bid=row["p_market_bid"],
+        p_market_ask=row["p_market_ask"], p_pin_low=row["p_pin_low"],
+        p_pin_high=row["p_pin_high"], note=row["note"], outcome=row["outcome"],
+        outcome_ts=datetime.fromisoformat(row["outcome_ts"]) if row["outcome_ts"] else None,
+        id=row["id"],
+    )
+
+
 def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
     """v4 -> v5: add ``raw_team`` and canonicalize every existing row's
     ``team``/``counterparty`` (and ``resolves.team``) against the packaged
@@ -374,6 +510,34 @@ _MIGRATIONS: list = [
         SELECT MIN(id) FROM resolves GROUP BY tournament, team, market
     );
     CREATE UNIQUE INDEX idx_resolves_unique ON resolves (tournament, team, market);
+    """,
+    # v6 -> v7: predictions -- a forecast fixed BEFORE a market resolves
+    # (model probability, Polymarket book, Pinnacle devig range), so it can
+    # later be scored against the ``resolves`` row for the same
+    # (tournament, team, market). UNIQUE on that triple makes a prediction
+    # IMMUTABLE by construction: Storage.record_prediction never UPDATEs an
+    # existing row, a repeat is a StorageError -- see its docstring for why
+    # (a calibration record you can quietly edit after the fact isn't one).
+    # outcome/outcome_ts are the one exception: filled in later by
+    # score_predictions() as a cache of "this is now scoreable", not a
+    # revision of the forecast itself.
+    """
+    CREATE TABLE predictions (
+        id            INTEGER PRIMARY KEY,
+        ts_utc        TEXT NOT NULL,
+        tournament    TEXT NOT NULL,
+        team          TEXT NOT NULL,
+        market        TEXT NOT NULL,
+        p_model       REAL,
+        p_market_bid  REAL,
+        p_market_ask  REAL,
+        p_pin_low     REAL,
+        p_pin_high    REAL,
+        note          TEXT,
+        outcome       TEXT,
+        outcome_ts    TEXT
+    );
+    CREATE UNIQUE INDEX idx_predictions_unique ON predictions (tournament, team, market);
     """,
 ]
 
@@ -731,3 +895,153 @@ class Storage:
             )
             for row in self._conn.execute(query, params)
         ]
+
+    # -- predictions / calibration --------------------------------------------
+
+    def record_prediction(self, prediction: Prediction) -> int:
+        """Store one prediction. IMMUTABLE on (tournament, team, market):
+        a second call for the same key is always a ``StorageError``, never
+        an update -- no ``--force``, no way to silently revise a forecast
+        after the fact (see ``Prediction``'s docstring). If a prediction
+        genuinely has a typo, fix it by hand in sqlite; this method will
+        not help you do that, on purpose.
+
+        Returns the new row's id (also set on the object).
+        """
+        try:
+            with self._conn:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO predictions
+                        (ts_utc, tournament, team, market, p_model,
+                         p_market_bid, p_market_ask, p_pin_low, p_pin_high, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        prediction.ts_utc.isoformat(), prediction.tournament,
+                        prediction.team, prediction.market, prediction.p_model,
+                        prediction.p_market_bid, prediction.p_market_ask,
+                        prediction.p_pin_low, prediction.p_pin_high, prediction.note,
+                    ),
+                )
+        except sqlite3.IntegrityError as e:
+            raise StorageError(
+                f"Prediction({prediction.team!r}, {prediction.market!r}) already recorded "
+                f"for tournament {prediction.tournament!r} -- predictions are immutable, "
+                f"a prediction is never overwritten (fix typos by hand in sqlite if truly "
+                f"needed)"
+            ) from e
+        prediction.id = cursor.lastrowid
+        return prediction.id
+
+    def predictions(
+        self,
+        tournament: Optional[str] = None,
+        team: Optional[str] = None,
+        market: Optional[str] = None,
+    ) -> list[Prediction]:
+        """Predictions, optionally narrowed, ordered by timestamp ascending."""
+        query = "SELECT * FROM predictions WHERE 1 = 1"
+        params: list = []
+        if tournament is not None:
+            query += " AND tournament = ?"
+            params.append(tournament)
+        if team is not None:
+            query += " AND team = ?"
+            params.append(team)
+        if market is not None:
+            query += " AND market = ?"
+            params.append(market)
+        query += " ORDER BY ts_utc ASC"
+        return [_row_to_prediction(row) for row in self._conn.execute(query, params)]
+
+    def score_predictions(self, tournament: Optional[str] = None) -> ScoreReport:
+        """Join every prediction against ``resolves`` on (tournament, team,
+        market) and score it: Brier of the model, of the Polymarket book
+        mid, and of the Pinnacle devig mid (each only where that source's
+        inputs were actually recorded). Predictions with no matching
+        resolve yet go into ``ScoreReport.pending`` instead -- never into
+        any metric.
+
+        As a side effect, backfills ``outcome``/``outcome_ts`` on newly-
+        scoreable rows (a cache, not a revision -- see ``Prediction``).
+        """
+        preds = self.predictions(tournament=tournament)
+        scored: list[ScoredPrediction] = []
+        pending: list[Prediction] = []
+
+        for pred in preds:
+            resolve_rows = self.resolves(pred.tournament, team=pred.team, market=pred.market)
+            if not resolve_rows:
+                pending.append(pred)
+                continue
+            resolve = resolve_rows[0]
+
+            if pred.outcome != resolve.outcome:
+                with self._conn:
+                    self._conn.execute(
+                        "UPDATE predictions SET outcome = ?, outcome_ts = ? WHERE id = ?",
+                        (resolve.outcome, resolve.ts_utc.isoformat(), pred.id),
+                    )
+                pred.outcome = resolve.outcome
+                pred.outcome_ts = resolve.ts_utc
+
+            y = 1 if resolve.outcome == "yes" else 0
+
+            brier_model = (pred.p_model - y) ** 2 if pred.p_model is not None else None
+
+            brier_market = None
+            if pred.p_market_bid is not None and pred.p_market_ask is not None:
+                mid = (pred.p_market_bid + pred.p_market_ask) / 2
+                brier_market = (mid - y) ** 2
+
+            brier_pin_mid = None
+            if pred.p_pin_low is not None and pred.p_pin_high is not None:
+                pin_mid = (pred.p_pin_low + pred.p_pin_high) / 2
+                brier_pin_mid = (pin_mid - y) ** 2
+
+            pin_range_hit = None
+            if (
+                pred.p_model is not None
+                and pred.p_pin_low is not None
+                and pred.p_pin_high is not None
+            ):
+                pin_range_hit = pred.p_pin_low <= pred.p_model <= pred.p_pin_high
+
+            scored.append(
+                ScoredPrediction(
+                    prediction=pred, outcome=resolve.outcome, y=y,
+                    brier_model=brier_model, brier_market=brier_market,
+                    brier_pin_mid=brier_pin_mid, pin_range_hit=pin_range_hit,
+                )
+            )
+
+        def _mean(values: list[float]) -> Optional[float]:
+            return sum(values) / len(values) if values else None
+
+        model_briers = [s.brier_model for s in scored if s.brier_model is not None]
+        market_briers = [s.brier_market for s in scored if s.brier_market is not None]
+        pin_briers = [s.brier_pin_mid for s in scored if s.brier_pin_mid is not None]
+        range_hits = [s.pin_range_hit for s in scored if s.pin_range_hit is not None]
+
+        mean_model = _mean(model_briers)
+        mean_market = _mean(market_briers)
+        delta = None
+        if mean_model is not None and mean_market is not None:
+            delta = mean_market - mean_model
+
+        return ScoreReport(
+            tournament=tournament,
+            scored=scored,
+            pending=pending,
+            n=len(scored),
+            n_model=len(model_briers),
+            mean_brier_model=mean_model,
+            n_market=len(market_briers),
+            mean_brier_market=mean_market,
+            n_pin=len(pin_briers),
+            mean_brier_pin_mid=_mean(pin_briers),
+            delta_model_minus_market=delta,
+            n_range_checkable=len(range_hits),
+            pin_range_hit_rate=_mean([1.0 if h else 0.0 for h in range_hits]),
+        )
