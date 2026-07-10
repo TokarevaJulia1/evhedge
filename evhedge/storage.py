@@ -1028,7 +1028,7 @@ class Storage:
         mean_market = _mean(market_briers)
         delta = None
         if mean_model is not None and mean_market is not None:
-            delta = mean_market - mean_model
+            delta = mean_model - mean_market
 
         return ScoreReport(
             tournament=tournament,

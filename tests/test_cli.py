@@ -529,4 +529,209 @@ def test_aliases_check_command_missing_db_gives_clean_error(tmp_path):
     ])
 
     assert result.exit_code != 0
+
+
+# --- predict / score (calibration loop) -----------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+
+
+def test_predict_command_immutable_second_call_errors(tmp_path):
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    args = [
+        "predict", "--db", str(db), "--tournament", "EWC", "--team", "Falcons",
+        "--market", "winner_no", "--model-p", "0.3",
+    ]
+    result1 = runner.invoke(main, args)
+    assert result1.exit_code == 0
+
+    result2 = runner.invoke(main, args)
+    assert result2.exit_code != 0
+    assert "Traceback" not in result2.output
+
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        rows = store.predictions(tournament="EWC", team="Falcons")
+        assert len(rows) == 1
+        assert rows[0].p_model == 0.3
+
+
+def test_predict_command_canonicalizes_team_from_loaded_map(tmp_path):
+    from evhedge.storage import Storage
+    from evhedge.team_aliases import canonical_name, load_default_aliases
+
+    # Whatever the packaged alias map resolves this to RIGHT NOW -- not
+    # hardcoded, since the map is allowed to change (see team_aliases.yaml).
+    expected_canon = canonical_name("Inner Circle", load_default_aliases())
+
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "predict", "--db", str(db), "--tournament", "EWC", "--team", "Inner Circle",
+        "--market", "winner_no", "--model-p", "0.4",
+    ])
+
+    assert result.exit_code == 0
+    with Storage(db) as store:
+        (pred,) = store.predictions(tournament="EWC")
+        assert pred.team == expected_canon
+
+
+def test_predict_command_pin_uses_devig_range_directly(tmp_path, monkeypatch):
+    """The CLI must call pinnacle.devig_range itself, not reimplement the
+    devig arithmetic -- proven by spying on the real call and comparing
+    what got stored against what the module itself returns."""
+    from evhedge.data_sources.pinnacle import devig_range as real_devig_range
+
+    calls = []
+
+    def spy(decimal_odds):
+        calls.append(list(decimal_odds))
+        return real_devig_range(decimal_odds)
+
+    monkeypatch.setattr("evhedge.cli.devig_range", spy)
+
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "predict", "--db", str(db), "--tournament", "T", "--team", "A", "--market", "m",
+        "--pin", "1.85/1.95",
+    ])
+
+    assert result.exit_code == 0
+    assert calls == [[1.85, 1.95]]
+
+    proportional, all_margin = real_devig_range([1.85, 1.95])
+    expected_low = min(proportional[0], all_margin[0])
+    expected_high = max(proportional[0], all_margin[0])
+
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        (pred,) = store.predictions(tournament="T")
+        assert abs(pred.p_pin_low - expected_low) < 1e-9
+        assert abs(pred.p_pin_high - expected_high) < 1e-9
+
+
+def test_predict_command_poly_manual_bid_ask(tmp_path):
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "predict", "--db", str(db), "--tournament", "T", "--team", "A", "--market", "m",
+        "--poly", "0.21/0.24",
+    ])
+
+    assert result.exit_code == 0
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        (pred,) = store.predictions(tournament="T")
+        assert pred.p_market_bid == 0.21
+        assert pred.p_market_ask == 0.24
+
+
+def test_score_command_france_morocco_fixture_brier(tmp_path):
+    """Real fixture: World Cup 2026, France-Morocco (09.07.2026).
+    p_model=0.232 (Morocco advances), Polymarket YES book 0.212/0.224
+    (mid 0.218), outcome=no. Brier model 0.232^2=0.053824, Brier market
+    0.218^2=0.047524, delta (model-market)=+0.0063 -- market beat model."""
+    from evhedge.storage import Prediction, Resolve, Storage
+
+    db = tmp_path / "e.db"
+    with Storage(db) as store:
+        store.record_prediction(Prediction(
+            tournament="FIFA World Cup 2026", team="Morocco", market="advance_no",
+            ts_utc=T0, p_model=0.232, p_market_bid=0.212, p_market_ask=0.224,
+        ))
+        store.record_resolve(Resolve(
+            tournament="FIFA World Cup 2026", team="Morocco", market="advance_no",
+            outcome="no", ts_utc=T0 + timedelta(hours=1),
+        ))
+
+        report = store.score_predictions(tournament="FIFA World Cup 2026")
+
+    (scored,) = report.scored
+    assert abs(scored.brier_model - 0.053824) < 1e-6
+    assert abs(scored.brier_market - 0.047524) < 1e-6
+    assert abs(report.delta_model_minus_market - 0.0063) < 1e-6
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "score", "--db", str(db), "--tournament", "FIFA World Cup 2026",
+    ])
+    assert result.exit_code == 0
+    assert "0.0538" in result.output
+    assert "0.0475" in result.output
+
+
+def test_score_command_synthetic_aggregate_hand_computed_means(tmp_path):
+    from evhedge.storage import Prediction, Resolve, Storage
+
+    db = tmp_path / "e.db"
+    with Storage(db) as store:
+        # brier_model=(0.5-1)^2=0.25,    market mid=0.45, brier_market=(0.45-1)^2=0.3025
+        store.record_prediction(Prediction(
+            tournament="T", team="A", market="m", ts_utc=T0,
+            p_model=0.5, p_market_bid=0.4, p_market_ask=0.5,
+        ))
+        store.record_resolve(Resolve(tournament="T", team="A", market="m", outcome="yes", ts_utc=T0))
+
+        # brier_model=(0.2-0)^2=0.04,    market mid=0.2,  brier_market=(0.2-0)^2=0.04
+        store.record_prediction(Prediction(
+            tournament="T", team="B", market="m", ts_utc=T0,
+            p_model=0.2, p_market_bid=0.1, p_market_ask=0.3,
+        ))
+        store.record_resolve(Resolve(tournament="T", team="B", market="m", outcome="no", ts_utc=T0))
+
+        # brier_model=(0.9-1)^2=0.01,    market mid=0.85, brier_market=(0.85-1)^2=0.0225
+        store.record_prediction(Prediction(
+            tournament="T", team="C", market="m", ts_utc=T0,
+            p_model=0.9, p_market_bid=0.8, p_market_ask=0.9,
+        ))
+        store.record_resolve(Resolve(tournament="T", team="C", market="m", outcome="yes", ts_utc=T0))
+
+        report = store.score_predictions(tournament="T")
+
+    mean_model = (0.25 + 0.04 + 0.01) / 3
+    mean_market = (0.3025 + 0.04 + 0.0225) / 3
+
+    assert report.n == 3
+    assert abs(report.mean_brier_model - mean_model) < 1e-9
+    assert abs(report.mean_brier_market - mean_market) < 1e-9
+    assert abs(report.delta_model_minus_market - (mean_model - mean_market)) < 1e-9
+
+
+def test_score_command_pending_excluded_from_metrics(tmp_path):
+    from evhedge.storage import Prediction, Resolve, Storage
+
+    db = tmp_path / "e.db"
+    with Storage(db) as store:
+        store.record_prediction(Prediction(
+            tournament="T", team="Resolved", market="m", ts_utc=T0,
+            p_model=0.5, p_market_bid=0.4, p_market_ask=0.5,
+        ))
+        store.record_resolve(Resolve(tournament="T", team="Resolved", market="m", outcome="yes", ts_utc=T0))
+
+        store.record_prediction(Prediction(
+            tournament="T", team="StillPending", market="m2", ts_utc=T0, p_model=0.3,
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["score", "--db", str(db), "--tournament", "T"])
+
+    assert result.exit_code == 0
+    assert "PENDING" in result.output
+    assert "StillPending" in result.output
+
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        report = store.score_predictions(tournament="T")
+        assert report.n == 1
+        assert len(report.pending) == 1
+        assert report.pending[0].team == "StillPending"
     assert "Traceback" not in result.output

@@ -36,6 +36,7 @@ from evhedge.consistency import (
     run_board_checks,
 )
 from evhedge.data_sources import polymarket as polymarket_ds
+from evhedge.data_sources.pinnacle import devig_range
 from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.engine import compute_ev
 from evhedge.montecarlo import plot_distribution, simulate
@@ -49,6 +50,7 @@ from evhedge.scanner import (
     sort_candidates,
 )
 from evhedge.storage import (
+    Prediction,
     Resolve,
     Storage,
     StorageError,
@@ -56,7 +58,7 @@ from evhedge.storage import (
     no_market_label,
     utcnow,
 )
-from evhedge.team_aliases import suggest_aliases
+from evhedge.team_aliases import canonical_name, load_default_aliases, suggest_aliases
 
 console = Console(width=120)
 error_console = Console(width=120, stderr=True, style="bold red")
@@ -648,6 +650,220 @@ def resolve_command(
         sys.exit(1)
 
     console.print(f"Резолв записан: {tournament} / {team} / {market} = {outcome}")
+
+
+@main.command("predict")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", required=True, help="Tournament label.")
+@click.option("--team", required=True, help="Any known spelling -- canonicalized on write.")
+@click.option(
+    "--market", required=True,
+    help="Same format as resolve's MARKET (JOIN-compatible with resolves.market).",
+)
+@click.option(
+    "--model-p", "model_p", type=float, default=None,
+    help="Model probability for this outcome, 0..1 (e.g. 0.62).",
+)
+@click.option(
+    "--model", "model_auto", type=click.Choice(["auto"]), default=None,
+    help="Auto-compute p_model via power_model.pair_prob -- NOT YET IMPLEMENTED "
+    "(needs bracket/counterparty/rounds-to-title scaffolding this command doesn't "
+    "have); use --model-p manually for now.",
+)
+@click.option(
+    "--poly", default=None,
+    help='Polymarket YES book at fixation time: "bid/ask" as 0..1 fractions, or '
+    '"auto" to pull best_bid_ask via the latest snapshot\'s token_id.',
+)
+@click.option(
+    "--pin", default=None,
+    help='Pinnacle decimal odds for this market\'s two outcomes, "yes_dec/no_dec" '
+    "-- always passed through devig_range, never computed by hand.",
+)
+@click.option("--note", default=None, help="Free-text note.")
+def predict_command(
+    db_path: Path,
+    tournament: str,
+    team: str,
+    market: str,
+    model_p: Optional[float],
+    model_auto: Optional[str],
+    poly: Optional[str],
+    pin: Optional[str],
+    note: Optional[str],
+) -> None:
+    """Fix a forecast for TEAM's MARKET before it resolves. Immutable: a
+    second predict on the same (tournament, team, market) is an error, not
+    an update -- fix a typo by hand in sqlite if you truly must."""
+    if model_auto is not None:
+        raise click.UsageError(
+            "--model auto пока не реализован (TODO) -- используйте --model-p вручную"
+        )
+    p_model = model_p
+
+    canon_team = canonical_name(team, load_default_aliases())
+
+    p_bid: Optional[float] = None
+    p_ask: Optional[float] = None
+    if poly is not None:
+        if poly == "auto":
+            with Storage(db_path) as store:
+                snaps = [
+                    s for s in store.snapshots(tournament, team=canon_team, market=market)
+                    if s.token_id
+                ]
+            if not snaps:
+                raise click.UsageError(
+                    f"--poly auto: в БД нет снапшота с token_id для "
+                    f"{canon_team!r}/{market!r} ({tournament!r})"
+                )
+            token_id = snaps[-1].token_id
+            try:
+                book = polymarket_ds.fetch_order_book(token_id)
+            except PolymarketAPIError as e:
+                error_console.print(f"Ошибка: {e}")
+                sys.exit(1)
+            p_bid, p_ask = polymarket_ds.best_bid_ask(book)
+            if p_bid is None or p_ask is None:
+                raise click.UsageError(
+                    "--poly auto: пустая книга (bid или ask отсутствует) -- задайте вручную"
+                )
+        else:
+            bid_str, sep, ask_str = poly.partition("/")
+            if not sep:
+                raise click.UsageError(f'--poly ожидает "bid/ask" или "auto", получено {poly!r}')
+            try:
+                p_bid, p_ask = float(bid_str), float(ask_str)
+            except ValueError:
+                raise click.UsageError(f"--poly: не удалось разобрать числа из {poly!r}")
+
+    p_pin_low: Optional[float] = None
+    p_pin_high: Optional[float] = None
+    if pin is not None:
+        yes_str, sep, no_str = pin.partition("/")
+        if not sep:
+            raise click.UsageError(f'--pin ожидает "yes_dec/no_dec", получено {pin!r}')
+        try:
+            d_yes, d_no = float(yes_str), float(no_str)
+        except ValueError:
+            raise click.UsageError(f"--pin: не удалось разобрать числа из {pin!r}")
+        try:
+            proportional, all_margin = devig_range([d_yes, d_no])
+        except ValueError as e:
+            raise click.UsageError(f"--pin: {e}")
+        p_pin_low = min(proportional[0], all_margin[0])
+        p_pin_high = max(proportional[0], all_margin[0])
+
+    try:
+        with Storage(db_path) as store:
+            pred = Prediction(
+                tournament=tournament, team=canon_team, market=market, ts_utc=utcnow(),
+                p_model=p_model, p_market_bid=p_bid, p_market_ask=p_ask,
+                p_pin_low=p_pin_low, p_pin_high=p_pin_high, note=note,
+            )
+            store.record_prediction(pred)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    console.print(
+        f"Прогноз записан: {tournament} / {canon_team} / {market} -- "
+        f"p_model={p_model if p_model is not None else '—'}, "
+        f"poly bid/ask={p_bid}/{p_ask}, "
+        f"pin range={p_pin_low}-{p_pin_high}"
+    )
+
+    if p_model is not None and p_pin_low is not None and p_pin_high is not None:
+        lo, hi = p_pin_low - 0.05, p_pin_high + 0.05
+        if not (lo <= p_model <= hi):
+            warn_console.print(
+                f"WARNING: p_model={p_model:.3f} вне диапазона Pinnacle "
+                f"[{p_pin_low:.3f}, {p_pin_high:.3f}] ± 5pp"
+            )
+
+
+@main.command("score")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", default=None, help="Limit to one tournament.")
+def score_command(db_path: Path, tournament: Optional[str]) -> None:
+    """Score every recorded prediction against its resolve: Brier of the
+    model, the Polymarket book mid, and the Pinnacle devig mid."""
+    try:
+        with Storage(db_path) as store:
+            report = store.score_predictions(tournament=tournament)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if report.pending:
+        table = Table(title=f"PENDING — ещё не резолвнуто ({len(report.pending)})")
+        table.add_column("Турнир")
+        table.add_column("Команда")
+        table.add_column("Рынок")
+        for p in report.pending:
+            table.add_row(p.tournament, p.team, p.market)
+        console.print(table)
+
+    if not report.scored:
+        warn_console.print("Нет резолвнутых прогнозов для скоринга.")
+        return
+
+    table = Table(title=f"score — {tournament or 'все турниры'}")
+    table.add_column("Турнир")
+    table.add_column("Команда")
+    table.add_column("Рынок")
+    table.add_column("Исход")
+    table.add_column("Brier модель", justify="right")
+    table.add_column("Brier рынок", justify="right")
+    table.add_column("Brier Pinnacle", justify="right")
+    for s in report.scored:
+        table.add_row(
+            s.prediction.tournament, s.prediction.team, s.prediction.market, s.outcome,
+            f"{s.brier_model:.4f}" if s.brier_model is not None else "—",
+            f"{s.brier_market:.4f}" if s.brier_market is not None else "—",
+            f"{s.brier_pin_mid:.4f}" if s.brier_pin_mid is not None else "—",
+        )
+    console.print(table)
+
+    summary = Table(title="Сводка")
+    summary.add_column("Метрика")
+    summary.add_column("Значение", justify="right")
+    summary.add_row("N (резолвнуто)", str(report.n))
+    summary.add_row(
+        "Mean Brier модель",
+        f"{report.mean_brier_model:.4f} (N={report.n_model})"
+        if report.mean_brier_model is not None else "—",
+    )
+    summary.add_row(
+        "Mean Brier рынок",
+        f"{report.mean_brier_market:.4f} (N={report.n_market})"
+        if report.mean_brier_market is not None else "—",
+    )
+    summary.add_row(
+        "Mean Brier Pinnacle",
+        f"{report.mean_brier_pin_mid:.4f} (N={report.n_pin})"
+        if report.mean_brier_pin_mid is not None else "—",
+    )
+    summary.add_row(
+        "Δ (модель − рынок, + = рынок точнее)",
+        f"{report.delta_model_minus_market:+.4f}"
+        if report.delta_model_minus_market is not None else "—",
+    )
+    summary.add_row(
+        "Pinnacle range hit rate",
+        f"{report.pin_range_hit_rate * 100:.1f}% (N={report.n_range_checkable})"
+        if report.pin_range_hit_rate is not None else "—",
+    )
+    console.print(summary)
+
+    if report.n < 30:
+        warn_console.print("выборка мала, различия незначимы (N < 30)")
 
 
 @main.command("check")

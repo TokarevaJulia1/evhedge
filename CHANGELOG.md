@@ -7,6 +7,37 @@
 ## [Unreleased]
 
 ### Добавлено
+- Калибровочный контур: таблица `predictions` (схема v6→v7) + `evhedge
+  predict` / `evhedge score`.
+  - `predictions`: `p_model` (опционально), `p_market_bid`/`p_market_ask`
+    (реальный YES-стакан Polymarket на момент фиксации, не доска),
+    `p_pin_low`/`p_pin_high` (bracket из `pinnacle.devig_range`, опционально),
+    `outcome`/`outcome_ts` (заполняются только скорингом). `UNIQUE(tournament,
+    team, market)`. **Неизменяемость принципиальна**: `record_prediction`
+    никогда не делает UPDATE полей прогноза — повтор того же ключа это
+    `StorageError`, без `--force`; поправить опечатку можно только вручную
+    в sqlite (DESIGN CHOICE, инструмент этого не облегчает специально).
+  - Единицы: `p_market_bid/ask` и `p_pin_low/high` — доли 0..1 (нативные
+    единицы `best_bid_ask`/`devig_range`), а не проценты 0..100 как
+    `price_snapshots.price_pct` — намеренное отличие, отмечено в докстринге
+    `Prediction`.
+  - `evhedge predict --db --tournament --team --market [--model-p |
+    --model auto] [--poly auto|"bid/ask"] [--pin "yes_dec/no_dec"] [--note]`.
+    `--team` канонизируется по `team_aliases.load_default_aliases()` перед
+    записью. `--poly auto` берёт `token_id` из последнего снапшота в БД и
+    зовёт `fetch_order_book`/`best_bid_ask` напрямую. `--pin` идёт строго
+    через `pinnacle.devig_range` (без дублирования арифметики). После
+    записи — WARNING (не блокер), если `p_model` вне `[p_pin_low−5пп,
+    p_pin_high+5пп]`. **DESIGN CHOICE**: `--model auto` (power_model.pair_prob
+    из аутрайт-цен) НЕ реализован — раскладка "counterparty + rounds_to_title
+    из живых данных" тянет за собой брекет-скаффолдинг, которого у этой
+    команды нет; явный `UsageError` с указанием использовать `--model-p`.
+  - `evhedge score [--db] [--tournament]`: JOIN `predictions` ↔ `resolves`
+    по `(tournament, team, market)`, Brier по каждому источнику (модель,
+    середина рынка, середина Pinnacle-devig) отдельно там, где есть входные
+    данные; нерезолвнутые прогнозы — в отдельную секцию PENDING, никогда не
+    участвуют в метриках. При N < 30 — честный баннер "выборка мала,
+    различия незначимы".
 - `evhedge/data/team_aliases.yaml`: две пары, подтверждённые структурно по
   боевой `data/ewc2026.db` (10.07) — не выдуманы, доказаны непересекающимися
   окнами снапшотов/резолвов и точным совпадением числа карт:
