@@ -29,14 +29,23 @@ placeholders are counted in the summary, never silently dropped.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from evhedge.auto_predict import (
+    book_quality_trigger,
+    compute_model_probability,
+    format_note,
+    result_market_label,
+)
 from evhedge.data_sources import polymarket as polymarket_ds
 from evhedge.data_sources.polymarket import PolymarketAPIError
-from evhedge.storage import PriceSnapshot, Resolve, Storage, utcnow
+from evhedge.storage import PriceSnapshot, Prediction, Resolve, Storage, StorageError, utcnow
 from evhedge.team_aliases import canonical_name, load_default_aliases
+
+logger = logging.getLogger(__name__)
 
 #: Match-event markets whose outcomes are the two team names and whose
 #: result we archive. DESIGN CHOICE: series + per-game winners only;
@@ -67,6 +76,9 @@ class CollectSummary:
     skipped_price_range: int = 0  # price at exactly 0 or 100 -- unquotable as (0,100)
     skipped_live: int = 0         # match already live: pre-match price history ends here
     book_fallback_to_board: int = 0  # verify_book requested but no usable book (error/empty side)
+    predictions_written: int = 0       # auto_predict: book-quality trigger fired, new row
+    predictions_skipped_duplicate: int = 0  # auto_predict: (tournament, team, market) already recorded
+    predictions_model_null: int = 0    # auto_predict: written, but p_model=None (no/heterogeneous stage_ranks)
     labels: list[str] = field(default_factory=list)
 
 
@@ -256,6 +268,7 @@ def collect_match_markets(
     ts_utc: Optional[datetime] = None,
     start_date_min: Optional[str] = None,
     verify_book: bool = False,
+    stage_ranks: Optional[dict[str, int]] = None,
 ) -> CollectSummary:
     """Walk every match event under a Gamma tag whose event title contains
     ``title_filter`` (e.g. "Esports World Cup"), and record:
@@ -268,7 +281,10 @@ def collect_match_markets(
       tokens), so the mirror row is a real second observation, not a
       derived one. Matches that have gone LIVE are skipped
       (``skipped_live``): the pre-match series ends at throw-in, in-play
-      prices are not entry prices.
+      prices are not entry prices. The same loop also auto-records a
+      ``predictions`` row the first time each side's book clears the
+      quality trigger (see ``evhedge.auto_predict``) -- no second Gamma
+      walk, it reuses the book fetch already made for the leg snapshot.
     - CLOSED result markets (series + per-game) -> two ``Resolve`` rows,
       market label ``result:<event_slug>:<market title>``: "yes" for the
       team whose side settled at 1, "no" for the other. A closed market
@@ -285,7 +301,14 @@ def collect_match_markets(
         verify_book: If True, fetch each leg's real order book and record
             its best bid/ask (``source="book"``) instead of the board
             price -- same rationale and fallback behavior as
-            ``collect_board``'s ``verify_book``.
+            ``collect_board``'s ``verify_book``. Also gates auto-predict
+            entirely: the trigger needs a real book (``source="book"``),
+            so with this off no leg market can ever fire it.
+        stage_ranks: Optional ``{team: rounds_to_title}`` map (see
+            ``auto_predict.load_stage_ranks``) for the model half of an
+            auto-recorded prediction. Missing/``None`` -> every
+            auto-recorded prediction has ``p_model=None`` (market-only),
+            never a crash -- see ``auto_predict.compute_model_probability``.
     """
     ts = ts_utc or utcnow()
     alias_map = load_default_aliases()
@@ -342,6 +365,31 @@ def collect_match_markets(
                         counterparty=team_y, token_id=token, raw_team=raw_x,
                     ))
                     summary.snapshots_written += 1
+
+                    if book_quality_trigger(source, bid_pct, ask_pct):
+                        p_model, board_ts, n = compute_model_probability(
+                            store, tournament, team_x, team_y, stage_ranks
+                        )
+                        try:
+                            store.record_prediction(Prediction(
+                                tournament=tournament, team=team_x,
+                                market=result_market_label(event, market), ts_utc=ts,
+                                p_model=p_model,
+                                p_market_bid=bid_pct / 100.0, p_market_ask=ask_pct / 100.0,
+                                note=format_note(board_ts, n),
+                            ))
+                            summary.predictions_written += 1
+                            if p_model is None:
+                                summary.predictions_model_null += 1
+                        except StorageError:
+                            # Already recorded for this (tournament, team, market) --
+                            # the expected steady state once triggered once, not an
+                            # error (predictions are immutable by design).
+                            logger.debug(
+                                "auto_predict: %s / %s / %s already recorded, skipping",
+                                tournament, team_x, result_market_label(event, market),
+                            )
+                            summary.predictions_skipped_duplicate += 1
                 continue
 
             # Closed: settle only on a clean 1/0.
@@ -349,7 +397,7 @@ def collect_match_markets(
                 summary.skipped_unresolved += 1
                 continue
             winner = team_a if prices[0] == 1.0 else team_b
-            label = f"result:{event.get('slug', '?')}:{market.get('groupItemTitle', '?')}"
+            label = result_market_label(event, market)
             for team in (team_a, team_b):
                 store.record_resolve(Resolve(
                     tournament=tournament, team=team, market=label,

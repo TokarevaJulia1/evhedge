@@ -292,3 +292,130 @@ def test_collect_match_markets_skips_live_matches(tmp_path, monkeypatch):
         legs = store.snapshots("EWC 2026 Dota 2", market="leg")
         # only the pre-match OPEN_MATCH produced legs (both directions)
         assert {l.team for l in legs} == {"Team Falcons", "BetBoom Team"}
+
+
+# --- auto_predict integration (collector-triggered predictions) -----------------------
+
+def test_auto_predict_trigger_fires_on_first_quality_book(tmp_path, monkeypatch):
+    """Real EWC-shaped sequence: a 4.0/96.0 listing placeholder, then a
+    settling-but-still-wide 40.0/46.0 (6pp), then a live 59.0/60.5
+    (1.5pp) -- only the third snapshot fires the trigger, and exactly
+    one prediction row is recorded, priced off THAT snapshot. BetBoom's
+    own book errors throughout (stays on board fallback) so it never
+    triggers -- isolates the assertion to one row, as the task fixture
+    describes."""
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook, PolymarketAPIError
+
+    def fake_fetch(tag_slug, closed=False, start_date_min=None):
+        return [] if closed else [OPEN_MATCH]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_tournament_markets", fake_fetch)
+
+    falcons_books = [
+        OrderBook("tokA", bids=[BookLevel(0.04, 10)], asks=[BookLevel(0.96, 10)]),   # listing, 92pp
+        OrderBook("tokA", bids=[BookLevel(0.40, 10)], asks=[BookLevel(0.46, 10)]),   # settling, 6pp
+        OrderBook("tokA", bids=[BookLevel(0.59, 10)], asks=[BookLevel(0.605, 10)]),  # live, 1.5pp -> fires
+    ]
+
+    with Storage(tmp_path / "e.db") as store:
+        for book in falcons_books:
+            def fake_order_book(token_id, _book=book):
+                if token_id == "tokA":
+                    return _book
+                raise PolymarketAPIError("BetBoom book unavailable")
+
+            monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_order_book", fake_order_book)
+            collect_match_markets(
+                store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup", verify_book=True,
+            )
+
+        preds = store.predictions(tournament="EWC 2026 Dota 2")
+        assert len(preds) == 1
+        (pred,) = preds
+        assert pred.team == "Team Falcons"
+        assert pred.market == "result:dota2-flc-bb4:Match Winner"
+        assert pred.p_market_bid == pytest.approx(0.59)
+        assert pred.p_market_ask == pytest.approx(0.605)
+
+
+def test_auto_predict_idempotent_on_repeat_pass(tmp_path, monkeypatch):
+    """A second collector pass over the same already-triggered market
+    writes zero new rows and raises nothing -- the UNIQUE-skip is the
+    expected steady state, not an error."""
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook
+
+    def fake_fetch(tag_slug, closed=False, start_date_min=None):
+        return [] if closed else [OPEN_MATCH]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_tournament_markets", fake_fetch)
+
+    books = {
+        "tokA": OrderBook("tokA", bids=[BookLevel(0.59, 10)], asks=[BookLevel(0.605, 10)]),
+        "tokB": OrderBook("tokB", bids=[BookLevel(0.395, 10)], asks=[BookLevel(0.41, 10)]),
+    }
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book", lambda token_id: books[token_id],
+    )
+
+    with Storage(tmp_path / "e.db") as store:
+        summary1 = collect_match_markets(
+            store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup", verify_book=True,
+        )
+        assert summary1.predictions_written == 2  # both directions trigger
+        assert summary1.predictions_skipped_duplicate == 0
+
+        summary2 = collect_match_markets(
+            store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup", verify_book=True,
+        )
+        assert summary2.predictions_written == 0
+        assert summary2.predictions_skipped_duplicate == 2
+
+        assert len(store.predictions(tournament="EWC 2026 Dota 2")) == 2
+
+
+def test_auto_predict_heterogeneous_n_writes_null_model(tmp_path, monkeypatch):
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook
+
+    def fake_fetch(tag_slug, closed=False, start_date_min=None):
+        return [] if closed else [OPEN_MATCH]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_tournament_markets", fake_fetch)
+
+    books = {
+        "tokA": OrderBook("tokA", bids=[BookLevel(0.59, 10)], asks=[BookLevel(0.605, 10)]),
+        "tokB": OrderBook("tokB", bids=[BookLevel(0.395, 10)], asks=[BookLevel(0.41, 10)]),
+    }
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book", lambda token_id: books[token_id],
+    )
+
+    with Storage(tmp_path / "e.db") as store:
+        summary = collect_match_markets(
+            store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup", verify_book=True,
+            stage_ranks={"Team Falcons": 2, "BetBoom Team": 3},  # heterogeneous
+        )
+        assert summary.predictions_written == 2
+        assert summary.predictions_model_null == 2
+        for pred in store.predictions(tournament="EWC 2026 Dota 2"):
+            assert pred.p_model is None
+            assert "p_model=NULL" in pred.note
+
+
+def test_auto_predict_no_prediction_for_live_match(tmp_path, monkeypatch):
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook
+
+    def fake_fetch(tag_slug, closed=False, start_date_min=None):
+        return [] if closed else [LIVE_MATCH]
+
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_tournament_markets", fake_fetch)
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book",
+        lambda token_id: OrderBook(token_id, bids=[BookLevel(0.59, 10)], asks=[BookLevel(0.605, 10)]),
+    )
+
+    with Storage(tmp_path / "e.db") as store:
+        summary = collect_match_markets(
+            store, "EWC 2026 Dota 2", "dota-2", "Esports World Cup", verify_book=True,
+        )
+        assert summary.predictions_written == 0
+        assert store.predictions(tournament="EWC 2026 Dota 2") == []

@@ -27,6 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
+from evhedge.auto_predict import load_stage_ranks, status_report
 from evhedge.collect import CollectError, collect_board, collect_match_markets
 from evhedge.config_io import ConfigError, load_full_config
 from evhedge.consistency import (
@@ -563,6 +564,15 @@ def snapshot_command(config: Path, db_path: Path) -> None:
     "independent second observation -- see collect.collect_board). Costs one "
     "extra request per side; falls back to the board price on failure.",
 )
+@click.option(
+    "--stage-ranks",
+    "stage_ranks_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="auto_predict.load_stage_ranks YAML ({team: rounds_to_title}) for the "
+    "model half of auto-recorded --matches predictions. Omit to auto-record "
+    "market-only predictions (p_model=NULL) -- never a crash.",
+)
 def pull_command(
     tournament: str,
     boards: tuple[str, ...],
@@ -570,6 +580,7 @@ def pull_command(
     matches_since: Optional[str],
     db_path: Path,
     verify_book: bool,
+    stage_ranks_path: Optional[Path],
 ) -> None:
     """Collect live Gamma board prices and match results into the DB."""
     if not boards and matches_spec is None:
@@ -586,6 +597,14 @@ def pull_command(
         if not sep or not tag or not title_filter:
             raise click.UsageError(f"--matches ожидает TAG:TITLE_FILTER, получено {matches_spec!r}")
 
+    stage_ranks = None
+    if stage_ranks_path is not None:
+        try:
+            stage_ranks = load_stage_ranks(stage_ranks_path)
+        except ConfigError as e:
+            error_console.print(f"Ошибка --stage-ranks: {e}")
+            sys.exit(1)
+
     summaries = []
     try:
         with Storage(db_path) as store:
@@ -594,7 +613,7 @@ def pull_command(
             if matches_spec is not None:
                 summaries.append(collect_match_markets(
                     store, tournament, tag, title_filter, start_date_min=matches_since,
-                    verify_book=verify_book,
+                    verify_book=verify_book, stage_ranks=stage_ranks,
                 ))
     except (CollectError, PolymarketAPIError, StorageError) as e:
         error_console.print(f"Ошибка: {e}")
@@ -607,6 +626,7 @@ def pull_command(
     table.add_column("Резолвов", justify="right")
     table.add_column("Пропущено (плейсх./форма/нерешено/цена/лайв)", justify="right")
     table.add_column("Book->board fallback", justify="right")
+    table.add_column("Прогнозов (нов./дубль/NULL)", justify="right")
     for s in summaries:
         table.add_row(
             "; ".join(s.labels),
@@ -616,6 +636,7 @@ def pull_command(
             f"{s.skipped_placeholders}/{s.skipped_shape}/{s.skipped_unresolved}"
             f"/{s.skipped_price_range}/{s.skipped_live}",
             str(s.book_fallback_to_board),
+            f"{s.predictions_written}/{s.predictions_skipped_duplicate}/{s.predictions_model_null}",
         )
     console.print(table)
 
@@ -864,6 +885,63 @@ def score_command(db_path: Path, tournament: Optional[str]) -> None:
 
     if report.n < 30:
         warn_console.print("выборка мала, различия незначимы (N < 30)")
+
+
+@main.group("autopredict")
+def autopredict_group() -> None:
+    """Inspect the auto-recorded predictions written by ``pull --matches``
+    (see ``evhedge.auto_predict``)."""
+
+
+@autopredict_group.command("status")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", default=None, help="Limit to one tournament.")
+def autopredict_status_command(db_path: Path, tournament: Optional[str]) -> None:
+    """How much of the calibration loop is on autopilot: predictions
+    auto-recorded so far (model vs market-only), and resolved markets
+    that never got a prediction at all (the selection-bias check this
+    module exists to drive toward zero)."""
+    try:
+        with Storage(db_path) as store:
+            status = status_report(store, tournament=tournament)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    summary = Table(title=f"autopredict status — {tournament or 'все турниры'}")
+    summary.add_column("Метрика")
+    summary.add_column("Значение", justify="right")
+    summary.add_row("Покрыто авто-прогнозами", str(status.n_covered))
+    summary.add_row("  из них с моделью", str(status.n_model))
+    summary.add_row("  из них market-only (p_model=NULL)", str(status.n_model_null))
+    summary.add_row(
+        "Резолвнуто БЕЗ прогноза (selection bias)",
+        str(status.n_resolved_without_prediction)
+        if status.n_resolved_without_prediction is not None else "—",
+    )
+    console.print(summary)
+
+    if status.recent:
+        table = Table(title="Последние авто-прогнозы")
+        table.add_column("Турнир")
+        table.add_column("Команда")
+        table.add_column("Рынок")
+        table.add_column("p_model", justify="right")
+        table.add_column("bid/ask", justify="right")
+        table.add_column("note")
+        for p in status.recent:
+            table.add_row(
+                p.tournament, p.team, p.market,
+                f"{p.p_model:.3f}" if p.p_model is not None else "—",
+                f"{p.p_market_bid:.3f}/{p.p_market_ask:.3f}",
+                p.note or "",
+            )
+        console.print(table)
+    else:
+        warn_console.print("Авто-прогнозов пока нет.")
 
 
 @main.command("check")
