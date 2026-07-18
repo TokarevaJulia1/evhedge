@@ -13,6 +13,16 @@ rem `evhedge pull` (the "skipped ... live" column): the pre-match price
 rem series ends at throw-in, in-play prices are not entry prices.
 rem New match days keep appearing through July 19 -- the loop just keeps
 rem running. Stop with Ctrl+C (or close the window).
+rem
+rem --stage-ranks configs\ewc_stage_ranks.yaml feeds auto_predict's model
+rem half (see evhedge/auto_predict.py). MAINTENANCE DISCIPLINE: this file
+rem goes stale every round played -- predictions are immutable, so a
+rem prediction fixed against a stale n is a permanently lost calibration
+rem point, not a bug to fix later. Update it BEFORE the next round's
+rem books list (evening after results, ahead of the next morning's
+rem listings) -- same "edit -> verify next cycle" discipline as
+rem team_aliases.yaml, checked via `evhedge autopredict status`'s "с
+rem моделью" column.
 rem =========================================================================
 
 cd /d "%~dp0.."
@@ -24,7 +34,8 @@ python -m evhedge.cli pull --tournament "EWC 2026 Dota 2" ^
   --board "ewc-dota-2-winner-20260622213517296:winner" ^
   --board "which-region-will-win-the-2026-esports-world-cup-dota-2-tournament-20260701152000046:region_winner" ^
   --matches "dota-2:Esports World Cup" --matches-since 2026-07-01 ^
-  --db data\ewc2026.db
+  --db data\ewc2026.db ^
+  --stage-ranks configs\ewc_stage_ranks.yaml
 if errorlevel 1 echo [%date% %time%] pull failed (network?) -- retrying in 15 min.
 
 timeout /t 900 /nobreak >nul

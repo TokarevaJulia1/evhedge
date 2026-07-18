@@ -1,0 +1,25 @@
+# configs/ewc_stage_ranks.yaml — состояние на 15.07 до R2
+# Победители групп (ждут QF): 3 победы до титула
+Team Falcons: 3
+Nigma Galaxy: 3
+PARIVISION: 3
+Team Yandex: 3
+
+# Вторые места (играют R2 сегодня): 4
+BetBoom Team: 4
+1W: 4
+Team Spirit: 4
+Aurora Gaming: 4
+
+# Победители R1 (играют R2 сегодня): 4
+LGD Gaming: 4
+Team Liquid: 4     # обыграл Xtreme Gaming, resolves dota2-liquid-xtreme-2026-07-14 (14.07 18:10)
+Rune Eaters: 4      # обыграл Virtus.pro, resolves dota2-re-vp-2026-07-14 (14.07 17:01)
+
+# Vici Gaming | PlayTime — БЕЗ резолва Match Winner в БД; последний leg-снапшот
+# (15.07 07:27) прыгнул с 70/29 на 50/51 за 35 минут -- похоже, матч сейчас
+# live. Не вписываю победителя, пока нет чистого резолва: отсутствие в карте
+# честно даст NULL, если рынок этой пары всплывёт раньше, чем файл поправят.
+
+# Вылетевших в файл не включать -- отсутствие в карте честно даёт NULL,
+# если вдруг всплывёт их рынок.
