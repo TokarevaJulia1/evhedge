@@ -542,7 +542,7 @@ def test_predict_command_immutable_second_call_errors(tmp_path):
     db = tmp_path / "e.db"
     runner = CliRunner()
     args = [
-        "predict", "--db", str(db), "--tournament", "EWC", "--team", "Falcons",
+        "predict", "--db", str(db), "--tournament", "EWC", "--team", "Nemesis",
         "--market", "winner_no", "--model-p", "0.3",
     ]
     result1 = runner.invoke(main, args)
@@ -555,7 +555,7 @@ def test_predict_command_immutable_second_call_errors(tmp_path):
     from evhedge.storage import Storage
 
     with Storage(db) as store:
-        rows = store.predictions(tournament="EWC", team="Falcons")
+        rows = store.predictions(tournament="EWC", team="Nemesis")
         assert len(rows) == 1
         assert rows[0].p_model == 0.3
 

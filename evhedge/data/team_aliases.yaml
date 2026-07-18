@@ -46,3 +46,32 @@
 # roster.
 "Poor Rangers":
   - "ZEDI Esports"
+
+# DESIGN CHOICE (cross-tournament, added when onboarding BLAST Bounty
+# 2026 Season 2 / CS2): "Team Spirit" and "Team Falcons" are multi-title
+# organizations that already have a canonical name in THIS file from the
+# Dota 2 side (EWC). The BLAST winner board (confirmed live via
+# fetch_event_by_slug on blast-bounty-2026-season-2-winner-20260709030103861,
+# 2026-07-16) writes them shorter: "Spirit", "Falcons". Applying the
+# letter of the header rule above ("canon = THIS board's spelling") would
+# mint a SECOND canonical spelling for the same real-world organization,
+# splitting its price history across two names for no reason other than
+# which game's board happened to be read first. That defeats the
+# rule's actual purpose (one stable name per team to join on), so this
+# is a deliberate exception in favor of the rule's INTENT over its
+# letter: the existing organization-level canon wins, the shorter
+# CS2-board spelling is added as an alias to it, not a new canonical
+# entry. Every OTHER BLAST team is a genuinely new organization with no
+# existing entry (Vitality, FURIA, G2, The MongolZ, FUT, Astralis, ...)
+# -- those follow the normal rule (canon = board spelling) with no
+# alias needed.
+#
+# "MOUZ" and "GamerLegion" appear on BOTH boards already spelled
+# IDENTICALLY (confirmed: EWC resolves have team="MOUZ" and
+# team="GamerLegion" verbatim) -- no alias entry needed for either, this
+# is not an oversight.
+"Team Spirit":
+  - "Spirit"
+
+"Team Falcons":
+  - "Falcons"

@@ -224,3 +224,23 @@ def test_status_report_counts_and_selection_bias(tmp_path):
         assert status.n_model_null == 1
         assert status.n_resolved_without_prediction == 1
         assert len(status.recent) == 2
+
+
+# --- BLAST Bounty 2026 Season 2 onboarding: stage_ranks ------------------------------
+
+def test_blast_stage_ranks_all_32_teams_uniform_n5():
+    """configs/blast_bounty_s2_stage_ranks.yaml: parses, exactly 32 teams
+    (the real winner-board count, confirmed live 2026-07-16), every value
+    is 5 -- Ro32/Ro16 (stage 1, Bo3 knockout) + QF/SF (stage 2, Bo3) +
+    grand final (Bo5) = 5 wins to the title for every team, the first
+    tournament in this project with uniform n from round one."""
+    ranks = load_stage_ranks("configs/blast_bounty_s2_stage_ranks.yaml")
+    assert len(ranks) == 32
+    assert all(n == 5 for n in ranks.values())
+
+    # pair-level uniformity (the property compute_model_probability
+    # actually relies on) holds for ANY two teams in this file, not just
+    # neighbors -- reusing the same check as test_uniform_n_within_bracket_pairs.
+    teams = list(ranks)
+    for a, b in zip(teams, teams[1:]):
+        assert ranks[a] == ranks[b] == 5

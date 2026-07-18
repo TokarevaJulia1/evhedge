@@ -294,6 +294,40 @@ def test_default_aliases_previous_pairs_still_work():
     assert canonical_name("L1ga Team", alias_map) == "L1GA TEAM"
 
 
+def test_blast_cs2_short_board_names_canonicalize_to_existing_org(tmp_path):
+    """BLAST Bounty 2026 Season 2 (CS2) onboarding: 'Spirit'/'Falcons' are
+    the SAME organizations as EWC's 'Team Spirit'/'Team Falcons' -- the
+    short CS2-board spelling must resolve to the existing Dota-side
+    canon, not mint a second canonical name for the same org."""
+    from evhedge.team_aliases import load_default_aliases
+
+    alias_map = load_default_aliases()
+    assert canonical_name("Spirit", alias_map) == "Team Spirit"
+    assert canonical_name("Team Spirit", alias_map) == "Team Spirit"  # self-map
+    assert canonical_name("Falcons", alias_map) == "Team Falcons"
+    assert canonical_name("Team Falcons", alias_map) == "Team Falcons"  # self-map
+
+    # every previously-confirmed Dota pair still works, untouched
+    assert canonical_name("1win", alias_map) == "1W"
+    assert canonical_name("Aurora", alias_map) == "Aurora Gaming"
+    assert canonical_name("ZEDI Esports", alias_map) == "Poor Rangers"
+
+    # "Aurora" is shared by both boards (CS2's own team is ALSO called
+    # "Aurora" on Polymarket) -- the EXISTING alias already covers it,
+    # no duplicate entry needed.
+    assert canonical_name("Aurora", alias_map) == "Aurora Gaming"
+
+    # teams that already spell identically on both boards -- no entry,
+    # not an oversight.
+    assert canonical_name("MOUZ", alias_map) == "MOUZ"
+    assert canonical_name("GamerLegion", alias_map) == "GamerLegion"
+
+    # a genuinely new CS2-only organization: canon = board spelling,
+    # no alias needed (this is the DEFAULT path, not a special case).
+    assert canonical_name("Vitality", alias_map) == "Vitality"
+    assert canonical_name("FURIA", alias_map) == "FURIA"
+
+
 def _resolve_row(tournament, team, market, outcome, ts):
     from evhedge.storage import Resolve
     return Resolve(tournament=tournament, team=team, market=market, outcome=outcome, ts_utc=ts)

@@ -1006,6 +1006,60 @@ def check_command(config: Path) -> None:
     warn_console.print(VERIFY_BOOK_CAVEAT)
 
 
+@main.group("stageranks")
+def stageranks_group() -> None:
+    """auto_predict stage-rank (rounds_to_title) map maintenance."""
+
+
+@stageranks_group.command("init")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB to read team names from.",
+)
+@click.option("--tournament", required=True, help="Tournament to generate the map for.")
+@click.option("--n", "rounds", type=int, required=True, help="rounds_to_title to assign every team.")
+@click.option(
+    "--out", type=click.Path(path_type=Path), required=True,
+    help="Output YAML path (auto_predict.load_stage_ranks format).",
+)
+@click.option("--force", is_flag=True, default=False, help="Overwrite --out without asking.")
+def stageranks_init_command(
+    db_path: Path, tournament: str, rounds: int, out: Path, force: bool
+) -> None:
+    """Generate a stage_ranks YAML: every team seen in --tournament's
+    snapshots -> --n, ready to hand-edit as the bracket progresses.
+
+    A one-shot starting point ONLY -- meant for the moment every team is
+    genuinely the same distance from the title (e.g. Ro32 of a clean
+    single-elim event). Re-running this later would flatten survivors and
+    eliminated teams back to the same n, which is wrong past round one --
+    from then on, edit the file by hand (see auto_predict.py's module
+    docstring on the pair-level n rule).
+    """
+    if out.exists() and not force:
+        click.confirm(f"Файл {out} уже существует. Перезаписать?", abort=True)
+
+    try:
+        with Storage(db_path) as store:
+            teams = store.distinct_team_names(tournament)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if not teams:
+        error_console.print(
+            f"Ошибка: в {db_path} нет ни одной команды для {tournament!r} -- "
+            f"сначала выполните pull"
+        )
+        sys.exit(1)
+
+    lines = [f"# stage_ranks: {tournament} -- сгенерировано `evhedge stageranks init`, все команды -> n={rounds}\n"]
+    for team in teams:
+        lines.append(f'"{team}": {rounds}\n')
+    out.write_text("".join(lines), encoding="utf-8")
+    console.print(f"Записано {len(teams)} команд -> {out}")
+
+
 @main.group("aliases")
 def aliases_group() -> None:
     """Team name alias tools: discover discrepancies, sanity-check a

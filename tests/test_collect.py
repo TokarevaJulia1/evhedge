@@ -419,3 +419,129 @@ def test_auto_predict_no_prediction_for_live_match(tmp_path, monkeypatch):
         )
         assert summary.predictions_written == 0
         assert store.predictions(tournament="EWC 2026 Dota 2") == []
+
+
+# --- BLAST Bounty 2026 Season 2 onboarding (CS2) -------------------------------------
+# Prices below match the real winner-board fixture from the onboarding prompt
+# (Vitality ~33/68, Falcons canonicalizes to "Team Falcons") -- the mechanism
+# under test is identical to EWC's, just parametrized differently, per Step 0.
+
+def test_blast_bounty_synthetic_pull_end_to_end(tmp_path, monkeypatch):
+    from evhedge.data_sources.polymarket import BookLevel, OrderBook
+
+    winner_event = {
+        "slug": "blast-bounty-2026-season-2-winner-test",
+        "title": "BLAST Bounty 2026 Season 2: Winner",
+        "markets": [
+            _market("Vitality", 0.33, 0.68, tokens=("tokVitY", "tokVitN")),
+            _market("Falcons", 0.10, 0.91, tokens=("tokFalY", "tokFalN")),
+        ],
+    }
+    open_match = {
+        "slug": "blast-vit-fal-2026-07-24",
+        "title": "Counter-Strike: Vitality vs Falcons (BO3) - Blast Bounty 2026 Season 2",
+        "markets": [
+            _market("series", 0.55, 0.45, outcomes=("Vitality", "Falcons"),
+                    group_title="Match Winner", tokens=("tokA", "tokB")),
+        ],
+    }
+    stage_ranks = {"Vitality": 5, "Team Falcons": 5}
+
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_event_by_slug", lambda slug: winner_event,
+    )
+    winner_books = {
+        "tokVitY": OrderBook("tokVitY", bids=[BookLevel(0.32, 100)], asks=[BookLevel(0.34, 100)]),
+        "tokVitN": OrderBook("tokVitN", bids=[BookLevel(0.66, 100)], asks=[BookLevel(0.68, 100)]),
+        "tokFalY": OrderBook("tokFalY", bids=[BookLevel(0.09, 100)], asks=[BookLevel(0.11, 100)]),
+        "tokFalN": OrderBook("tokFalN", bids=[BookLevel(0.89, 100)], asks=[BookLevel(0.91, 100)]),
+    }
+    monkeypatch.setattr(
+        "evhedge.collect.polymarket_ds.fetch_order_book", lambda tok: winner_books[tok],
+    )
+
+    with Storage(tmp_path / "blast2026.db") as store:
+        summary = collect_board(
+            store, "BLAST Bounty 2026 Season 2", "blast-bounty-2026-season-2-winner-test",
+            "winner", verify_book=True,
+        )
+        assert summary.snapshots_written == 4  # 2 teams x yes/no
+
+        # canonicalized: board said "Falcons" -> stored as "Team Falcons"
+        # (existing Dota-side canon, see team_aliases.yaml DESIGN CHOICE)
+        (fal_yes,) = store.snapshots(
+            "BLAST Bounty 2026 Season 2", team="Team Falcons", market="winner_yes"
+        )
+        assert fal_yes.raw_team == "Falcons"
+        assert fal_yes.price_pct == pytest.approx(11.0)  # book ask
+        (vit_yes,) = store.snapshots(
+            "BLAST Bounty 2026 Season 2", team="Vitality", market="winner_yes"
+        )
+        assert vit_yes.raw_team is None  # already canonical, board == canon
+        assert vit_yes.price_pct == pytest.approx(34.0)
+
+        monkeypatch.setattr(
+            "evhedge.collect.polymarket_ds.fetch_tournament_markets",
+            lambda tag_slug, closed=False, start_date_min=None: [] if closed else [open_match],
+        )
+
+        # pass 1: empty listing book (4/96, 92pp spread) -- no trigger
+        listing_books = {
+            "tokA": OrderBook("tokA", bids=[BookLevel(0.04, 10)], asks=[BookLevel(0.96, 10)]),
+            "tokB": OrderBook("tokB", bids=[BookLevel(0.04, 10)], asks=[BookLevel(0.96, 10)]),
+        }
+        monkeypatch.setattr(
+            "evhedge.collect.polymarket_ds.fetch_order_book", lambda tok: listing_books[tok],
+        )
+        collect_match_markets(
+            store, "BLAST Bounty 2026 Season 2", "cs2", "Bounty 2026 Season 2",
+            verify_book=True, stage_ranks=stage_ranks,
+        )
+        assert store.predictions(tournament="BLAST Bounty 2026 Season 2") == []
+
+        # pass 2: real book, 60/63 (3pp) -- fires, p_model computed (n=5/5)
+        live_books = {
+            "tokA": OrderBook("tokA", bids=[BookLevel(0.60, 10)], asks=[BookLevel(0.63, 10)]),
+            "tokB": OrderBook("tokB", bids=[BookLevel(0.37, 10)], asks=[BookLevel(0.40, 10)]),
+        }
+        monkeypatch.setattr(
+            "evhedge.collect.polymarket_ds.fetch_order_book", lambda tok: live_books[tok],
+        )
+        summary2 = collect_match_markets(
+            store, "BLAST Bounty 2026 Season 2", "cs2", "Bounty 2026 Season 2",
+            verify_book=True, stage_ranks=stage_ranks,
+        )
+        assert summary2.predictions_written == 2  # both directions fire
+        assert summary2.predictions_model_null == 0
+
+        preds = {p.team: p for p in store.predictions(tournament="BLAST Bounty 2026 Season 2")}
+        assert preds["Vitality"].p_market_bid == pytest.approx(0.60)
+        assert preds["Vitality"].p_market_ask == pytest.approx(0.63)
+        assert preds["Vitality"].p_model is not None
+        assert preds["Team Falcons"].p_model is not None
+
+
+def test_blast_pull_does_not_write_into_ewc_db(tmp_path, monkeypatch):
+    """DB isolation: a BLAST collection pass touches only the DB file it
+    was pointed at -- data/blast2026.db and data/ewc2026.db never share
+    rows, same as any two separately-pathed Storage instances."""
+    event = {
+        "slug": "blast-bounty-2026-season-2-winner-test",
+        "title": "BLAST Bounty 2026 Season 2: Winner",
+        "markets": [_market("Vitality", 0.33, 0.68)],
+    }
+    monkeypatch.setattr("evhedge.collect.polymarket_ds.fetch_event_by_slug", lambda slug: event)
+
+    ewc_db = tmp_path / "ewc2026.db"
+    blast_db = tmp_path / "blast2026.db"
+
+    with Storage(ewc_db):
+        pass  # just create the file, empty
+
+    with Storage(blast_db) as store:
+        collect_board(store, "BLAST Bounty 2026 Season 2", "blast-bounty-2026-season-2-winner-test", "winner")
+
+    with Storage(ewc_db) as store:
+        assert store.snapshots("BLAST Bounty 2026 Season 2") == []
+    with Storage(blast_db) as store:
+        assert len(store.snapshots("BLAST Bounty 2026 Season 2")) == 2
