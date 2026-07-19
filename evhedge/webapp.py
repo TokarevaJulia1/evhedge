@@ -41,7 +41,7 @@ STATIC_DIR = Path(__file__).parent / "webapp_static"
 #: browser never depends on fields that might change/disappear upstream.
 _POSITION_FIELDS = (
     "title", "outcome", "eventSlug", "slug", "size", "avgPrice",
-    "initialValue", "currentValue", "curPrice", "asset",
+    "initialValue", "currentValue", "curPrice", "asset", "redeemable",
 )
 
 

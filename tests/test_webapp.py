@@ -25,7 +25,7 @@ def test_positions_payload_trims_to_known_fields(monkeypatch):
     raw = [{
         "title": "T", "outcome": "Yes", "eventSlug": "e", "slug": "s",
         "size": 10.0, "avgPrice": 0.5, "initialValue": 5.0, "currentValue": 6.0,
-        "curPrice": 0.6, "asset": "tok1", "somethingElseEntirely": "ignored",
+        "curPrice": 0.6, "asset": "tok1", "redeemable": False, "somethingElseEntirely": "ignored",
     }]
     monkeypatch.setattr("evhedge.webapp.polymarket_ds.fetch_positions", lambda addr, limit=500: raw)
 
@@ -33,8 +33,25 @@ def test_positions_payload_trims_to_known_fields(monkeypatch):
     assert payload == [{
         "title": "T", "outcome": "Yes", "eventSlug": "e", "slug": "s",
         "size": 10.0, "avgPrice": 0.5, "initialValue": 5.0, "currentValue": 6.0,
-        "curPrice": 0.6, "asset": "tok1",
+        "curPrice": 0.6, "asset": "tok1", "redeemable": False,
     }]
+
+
+def test_positions_payload_surfaces_redeemable_resolved_positions(monkeypatch):
+    """A market that resolved but wasn't redeemed yet still shows up as
+    a position (real behavior, confirmed live) -- redeemable=True is the
+    signal the dashboard uses to badge it as no longer a LIVE position."""
+    raw = [{
+        "title": "Dota 2: Team Yandex vs PARIVISION (BO3) - Esports World Cup Playoffs",
+        "outcome": "Team Yandex", "eventSlug": "e", "slug": "s",
+        "size": 1233.9931, "avgPrice": 0.53, "initialValue": 654.0163,
+        "currentValue": 0, "curPrice": 0, "asset": "tok1", "redeemable": True,
+    }]
+    monkeypatch.setattr("evhedge.webapp.polymarket_ds.fetch_positions", lambda addr, limit=500: raw)
+
+    (payload,) = positions_payload("0xabc")
+    assert payload["redeemable"] is True
+    assert payload["curPrice"] == 0
 
 
 def test_book_payload_uses_best_bid_ask(monkeypatch):
@@ -87,13 +104,13 @@ def test_server_positions_endpoint_returns_data(running_server, monkeypatch):
         "evhedge.webapp.polymarket_ds.fetch_positions",
         lambda addr, limit=500: [{"title": "T", "outcome": "Yes", "size": 1.0, "asset": "tok1",
                                    "avgPrice": 0.5, "initialValue": 0.5, "currentValue": 0.5,
-                                   "curPrice": 0.5, "eventSlug": "e", "slug": "s"}],
+                                   "curPrice": 0.5, "eventSlug": "e", "slug": "s", "redeemable": False}],
     )
     status, body = _get_json(running_server + "/api/positions?address=0xabc")
     assert status == 200
     assert body == [{"title": "T", "outcome": "Yes", "eventSlug": "e", "slug": "s",
                       "size": 1.0, "avgPrice": 0.5, "initialValue": 0.5, "currentValue": 0.5,
-                      "curPrice": 0.5, "asset": "tok1"}]
+                      "curPrice": 0.5, "asset": "tok1", "redeemable": False}]
 
 
 def test_server_positions_endpoint_maps_api_error_to_502(running_server, monkeypatch):

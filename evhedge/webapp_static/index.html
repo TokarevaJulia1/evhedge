@@ -78,9 +78,14 @@
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px;
   }
+  .position-row.resolved { opacity: 0.55; }
   .position-row .pos-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .position-row .pos-title { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .position-row .pos-title { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
   .position-row .pos-sub { color: var(--muted); font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .badge-redeemable {
+    flex-shrink: 0; font-size: 10px; letter-spacing: 0.03em; text-transform: uppercase;
+    color: #E3A73F; border: 1px solid #E3A73F; border-radius: 4px; padding: 1px 6px; font-weight: 600;
+  }
 
   /* --- params --- */
   .params-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
@@ -395,8 +400,10 @@
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "неизвестная ошибка");
       renderPositions(data);
+      const liveCount = data.filter((p) => !p.redeemable).length;
+      const resolvedCount = data.length - liveCount;
       connStatus.textContent = data.length
-        ? `Найдено открытых позиций: ${data.length}`
+        ? `Живых позиций: ${liveCount}` + (resolvedCount ? `, резолвнуто и ждёт redeem: ${resolvedCount}` : "")
         : "Открытых позиций не найдено для этого адреса.";
     } catch (err) {
       connStatus.classList.add("err");
@@ -408,13 +415,21 @@
   }
 
   function renderPositions(positions) {
+    // Резолвнутые-но-не-заредимленные позиции — не "живые" в смысле
+    // цепочки переката: показываем их, но приглушённо и с бейджем, а не
+    // вперемешку с реально открытыми.
+    const sorted = [...positions].sort((a, b) => (a.redeemable ? 1 : 0) - (b.redeemable ? 1 : 0));
+
     positionsList.innerHTML = "";
-    positions.forEach((p) => {
+    sorted.forEach((p) => {
       const div = document.createElement("div");
-      div.className = "position-row";
+      div.className = "position-row" + (p.redeemable ? " resolved" : "");
+      const badge = p.redeemable
+        ? '<span class="badge-redeemable" title="Рынок резолвнулся, но выигрыш ещё не забран (redeem) — не считается живой позицией">резолвнуто · ждёт redeem</span>'
+        : "";
       div.innerHTML = `
         <div class="pos-main">
-          <div class="pos-title">${p.title || "—"} — ${p.outcome || "?"}</div>
+          <div class="pos-title">${p.title || "—"} — ${p.outcome || "?"} ${badge}</div>
           <div class="pos-sub">${(p.size || 0).toFixed(2)} шт. · вход ${pct(p.avgPrice)} · тек. цена ${pct(p.curPrice)} · вложено ${formatMoney(p.initialValue)}</div>
         </div>
         <button class="btn-accent" data-load-slug="${p.slug || ""}">Загрузить</button>
