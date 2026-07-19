@@ -89,6 +89,7 @@
 
   /* --- params --- */
   .params-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+  .params-grid-single { grid-template-columns: minmax(0, 320px); }
 
   /* --- table --- */
   .table-head-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
@@ -123,6 +124,7 @@
 
   /* --- totals --- */
   .totals-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .totals-grid-single { grid-template-columns: minmax(0, 360px); }
   .total-card .eyebrow { margin-bottom: 10px; }
   .total-figure { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 700; }
   .total-figure.profit { color: var(--profit); }
@@ -162,18 +164,10 @@
   <!-- Базовые параметры -->
   <section class="card">
     <div class="eyebrow">Базовые параметры</div>
-    <div class="params-grid">
+    <div class="params-grid params-grid-single">
       <div>
         <label class="field-label" for="initialCapital">Начальный капитал ($)</label>
         <input id="initialCapital" type="number" step="0.01" value="1000" />
-      </div>
-      <div>
-        <label class="field-label" for="hedgeUnitCost">Стоимость единицы хеджа ($/¢)</label>
-        <input id="hedgeUnitCost" type="number" step="0.0001" value="0.05" />
-      </div>
-      <div>
-        <label class="field-label" for="hedgeVolume">Объём хеджирования (ед.)</label>
-        <input id="hedgeVolume" type="number" step="1" value="1000" />
       </div>
     </div>
   </section>
@@ -207,17 +201,9 @@
   </section>
 
   <!-- Итоги -->
-  <section class="totals-grid">
-    <div class="card total-card">
-      <div class="eyebrow">Общий доход цепочки</div>
-      <div class="total-figure profit" id="totalRevenue">$0.00</div>
-    </div>
-    <div class="card total-card">
-      <div class="eyebrow">Расходы на хедж</div>
-      <div class="total-figure loss" id="hedgeCost">-$0.00</div>
-    </div>
+  <section class="totals-grid totals-grid-single">
     <div class="card total-card pnl" id="pnlCard">
-      <div class="eyebrow">Итоговый PnL (чистая прибыль)</div>
+      <div class="eyebrow">Итоговый PnL (чистая прибыль цепочки)</div>
       <div class="total-figure" id="netPnl">$0.00</div>
     </div>
   </section>
@@ -245,8 +231,6 @@
 
   const $ = (id) => document.getElementById(id);
   const initialCapitalEl = $("initialCapital");
-  const hedgeUnitCostEl = $("hedgeUnitCost");
-  const hedgeVolumeEl = $("hedgeVolume");
   const rowsBody = $("rowsBody");
   const strategyNameEl = $("strategyName");
 
@@ -329,12 +313,11 @@
       rowsBody.appendChild(tr);
     });
 
-    const totalRevenue = computed.reduce((sum, r) => (r.reachable && r.status === STATUS.COMPLETED) ? sum + r.netProfit : sum, 0);
-    const hedgeCost = (parseFloat(hedgeUnitCostEl.value) || 0) * (parseFloat(hedgeVolumeEl.value) || 0);
-    const netPnl = totalRevenue - hedgeCost;
-
-    $("totalRevenue").textContent = formatMoney(totalRevenue, true);
-    $("hedgeCost").textContent = "-" + formatMoney(Math.abs(hedgeCost)).replace("-", "");
+    // Хеджа как отдельной статьи расходов в стратегии нет -- каждый этап
+    // цепочки САМ является хеджем предыдущего (см. чат: перекат = ставка
+    // на следующий матч из уже гарантированного профита). PnL = сумма
+    // чистого дохода завершённых этапов, без вычитаемых посторонних сумм.
+    const netPnl = computed.reduce((sum, r) => (r.reachable && r.status === STATUS.COMPLETED) ? sum + r.netProfit : sum, 0);
 
     const pnlEl = $("netPnl");
     pnlEl.textContent = formatMoney(netPnl, true);
@@ -370,7 +353,7 @@
     render();
   });
 
-  [initialCapitalEl, hedgeUnitCostEl, hedgeVolumeEl].forEach((el) => el.addEventListener("input", render));
+  initialCapitalEl.addEventListener("input", render);
 
   // ---------- Polymarket: живые позиции ----------
 
