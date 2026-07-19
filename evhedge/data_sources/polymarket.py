@@ -32,6 +32,7 @@ import httpx
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 CLOB_API_URL = "https://clob.polymarket.com"
+DATA_API_URL = "https://data-api.polymarket.com"
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_RETRIES = 2
@@ -138,6 +139,47 @@ def fetch_event_by_slug(slug: str, closed: bool = False) -> dict | None:
     if isinstance(data, list) and data:
         return data[0]
     return None
+
+
+def fetch_positions(address: str, limit: int = 500) -> list[dict]:
+    """Every OPEN position currently held by a public Polymarket
+    (Polygon) wallet address -- the public Data API, no authentication:
+    this is on-chain-derived read data, not a private-account endpoint
+    (unlike CLOB order placement/cancellation, which needs a signed
+    API key derived from the wallet's private key and is deliberately
+    NOT wrapped here).
+
+    Args:
+        address: Polygon wallet address (0x...), as used to sign in on
+            Polymarket -- not an email or username.
+        limit: Max positions returned. DESIGN CHOICE: a single
+            unpaginated call, not ``_get_paginated`` -- 500 comfortably
+            covers a real portfolio and the endpoint's own response
+            carries no next-page cursor to walk. A wallet with more than
+            500 simultaneous open positions would silently see only the
+            first 500; not observed in practice, noted rather than
+            solved speculatively.
+
+    Returns:
+        Raw Data API position dicts, unmodified. Each has (at least)
+        ``title`` (market question), ``outcome`` (side held, e.g. a team
+        name for a Yes/No team market), ``size`` (shares held),
+        ``avgPrice``, ``initialValue`` (cost basis = size * avgPrice),
+        ``currentValue``, ``curPrice``, ``asset`` (CLOB token id -- feed
+        this to ``fetch_order_book`` for a live price), ``eventSlug``,
+        ``slug``.
+
+    Raises:
+        PolymarketAPIError: On a network/HTTP failure after retries, or
+            a malformed address the API itself rejects (400).
+    """
+    data = _get(f"{DATA_API_URL}/positions", params={"user": address, "limit": limit})
+    if not isinstance(data, list):
+        raise PolymarketAPIError(
+            f"неожиданный формат ответа Data API /positions для {address!r}: "
+            f"ожидался список, получено {type(data).__name__}"
+        )
+    return data
 
 
 # ---------------------------------------------------------------------------

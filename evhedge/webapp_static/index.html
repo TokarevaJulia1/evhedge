@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Roll-Over Chain — цепочка сделок</title>
+<style>
+  :root {
+    --bg: #0B0F17;
+    --surface: #161B22;
+    --border: #242C38;
+    --text: #F0F3F7;
+    --muted: #8B949E;
+    --accent: #2DD4BF;
+    --accent-dim: #2DD4BF33;
+    --profit: #3FDB92;
+    --loss: #E5484D;
+    --loss-dim: #E5484D22;
+    --font-ui: -apple-system, "Segoe UI", "Inter", system-ui, sans-serif;
+    --font-num: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-ui); }
+  body { padding: 40px 20px 80px; }
+  .page { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 22px 24px; }
+  .eyebrow { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
+  label.field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+
+  input[type="text"], input[type="number"], select {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+    padding: 9px 11px; color: var(--text); font-family: var(--font-num); font-variant-numeric: tabular-nums;
+    font-size: 14px; transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  input::placeholder { color: #4b525c; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+  input:disabled, select:disabled { opacity: 0.35; cursor: not-allowed; }
+  input[type="number"] { text-align: right; }
+
+  button { font-family: var(--font-ui); cursor: pointer; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .btn-accent {
+    display: inline-flex; align-items: center; gap: 7px; background: transparent; border: 1px solid var(--accent);
+    color: var(--accent); border-radius: 7px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+    transition: background 0.15s ease; white-space: nowrap;
+  }
+  .btn-accent:hover { background: var(--accent-dim); }
+  .btn-accent:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-remove {
+    background: none; border: none; color: var(--muted); padding: 6px; border-radius: 6px;
+    display: inline-flex; transition: color 0.15s ease, background 0.15s ease;
+  }
+  .btn-remove:hover { color: var(--loss); background: var(--loss-dim); }
+
+  .btn-ghost {
+    background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px;
+    padding: 4px 9px; font-size: 12px; transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  .strategy-name {
+    width: 100%; background: transparent; border: none; border-bottom: 1px solid var(--border); color: var(--text);
+    font-family: var(--font-ui); font-size: 26px; font-weight: 700; text-wrap: balance; padding: 6px 2px 10px;
+  }
+  .strategy-name:focus { outline: none; border-bottom-color: var(--accent); }
+
+  /* --- Polymarket connect card --- */
+  .connect-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 14px; flex-wrap: wrap; }
+  .connect-row .addr-field { flex: 1; min-width: 260px; }
+  .conn-status { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
+  .conn-status.err { color: var(--loss); }
+
+  .positions-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+  .position-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px;
+  }
+  .position-row .pos-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .position-row .pos-title { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .position-row .pos-sub { color: var(--muted); font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; }
+
+  /* --- params --- */
+  .params-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+
+  /* --- table --- */
+  .table-head-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 880px; }
+  thead th {
+    text-align: left; color: var(--muted); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+    font-weight: 600; padding: 0 10px 10px 0; border-bottom: 1px solid var(--border);
+  }
+  tbody tr { border-bottom: 1px solid #1c222c; }
+  tbody tr.locked { opacity: 0.4; }
+  tbody td {
+    padding: 10px 10px 10px 0; vertical-align: middle; font-family: var(--font-num);
+    font-variant-numeric: tabular-nums; font-size: 14px;
+  }
+  td.idx { color: var(--muted); width: 26px; }
+  td.coef-cell input { max-width: 110px; }
+  td.status-cell select { max-width: 148px; }
+  .amount { font-weight: 600; }
+  .amount.profit { color: var(--profit); }
+  .amount.loss { color: var(--loss); }
+  .implied-cell { color: var(--muted); font-size: 13px; }
+  .implied-cell b { color: var(--text); font-weight: 600; }
+  .lock-note { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--font-ui); font-size: 13px; }
+  .status-pill-completed { border-color: #3FDB9255 !important; color: var(--profit) !important; }
+  .status-pill-pending { border-color: #E3A73F55 !important; color: #E3A73F !important; }
+  .empty-row td { text-align: center; color: var(--muted); padding: 32px 0; font-family: var(--font-ui); }
+  .live-tag {
+    display: inline-block; margin-left: 6px; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 5px;
+  }
+
+  /* --- totals --- */
+  .totals-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .total-card .eyebrow { margin-bottom: 10px; }
+  .total-figure { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 700; }
+  .total-figure.profit { color: var(--profit); }
+  .total-figure.loss { color: var(--loss); }
+  .total-card.pnl { border-width: 2px; }
+  .total-card.pnl.is-profit { border-color: #3FDB9270; }
+  .total-card.pnl.is-loss { border-color: #E5484D70; }
+
+  @media (max-width: 720px) {
+    .params-grid, .totals-grid { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <label class="field-label" for="strategyName">Название стратегии / цепочки</label>
+    <input id="strategyName" class="strategy-name" type="text" value="Без названия — новая цепочка" placeholder="Название стратегии / цепочки" />
+  </header>
+
+  <!-- Подключение к Polymarket -->
+  <section class="card">
+    <div class="eyebrow">Подключение к Polymarket (публичный адрес кошелька)</div>
+    <div class="connect-row">
+      <div class="addr-field">
+        <label class="field-label" for="walletAddress">Адрес кошелька (0x...)</label>
+        <input id="walletAddress" type="text" placeholder="0x..." />
+      </div>
+      <button class="btn-accent" id="fetchPositionsBtn">Обновить позиции</button>
+    </div>
+    <div class="conn-status" id="connStatus"></div>
+    <div class="positions-list" id="positionsList"></div>
+  </section>
+
+  <!-- Базовые параметры -->
+  <section class="card">
+    <div class="eyebrow">Базовые параметры</div>
+    <div class="params-grid">
+      <div>
+        <label class="field-label" for="initialCapital">Начальный капитал ($)</label>
+        <input id="initialCapital" type="number" step="0.01" value="1000" />
+      </div>
+      <div>
+        <label class="field-label" for="hedgeUnitCost">Стоимость единицы хеджа ($/¢)</label>
+        <input id="hedgeUnitCost" type="number" step="0.0001" value="0.05" />
+      </div>
+      <div>
+        <label class="field-label" for="hedgeVolume">Объём хеджирования (ед.)</label>
+        <input id="hedgeVolume" type="number" step="1" value="1000" />
+      </div>
+    </div>
+  </section>
+
+  <!-- Таблица цепочки -->
+  <section class="card">
+    <div class="table-head-row">
+      <div class="eyebrow">Цепочка сделок (Roll-Over)</div>
+      <button class="btn-accent" id="addRowBtn">
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        Добавить этап
+      </button>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>№</th>
+            <th>Коэффициент доходности</th>
+            <th>Сумма сделки ($)</th>
+            <th>Чистый доход ($)</th>
+            <th>Баланс после ($)</th>
+            <th>Импл. цена / Шардов</th>
+            <th>Статус</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="rowsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Итоги -->
+  <section class="totals-grid">
+    <div class="card total-card">
+      <div class="eyebrow">Общий доход цепочки</div>
+      <div class="total-figure profit" id="totalRevenue">$0.00</div>
+    </div>
+    <div class="card total-card">
+      <div class="eyebrow">Расходы на хедж</div>
+      <div class="total-figure loss" id="hedgeCost">-$0.00</div>
+    </div>
+    <div class="card total-card pnl" id="pnlCard">
+      <div class="eyebrow">Итоговый PnL (чистая прибыль)</div>
+      <div class="total-figure" id="netPnl">$0.00</div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  const STATUS = { COMPLETED: "completed", PENDING: "pending" };
+
+  // Каждая строка может нести привязанную живую позицию Polymarket
+  // (asset = CLOB token id) -- только для строки, реально загруженной
+  // из открытой позиции; гипотетические будущие этапы её не имеют.
+  let rows = [
+    { id: 1, coefficient: 0.85, status: STATUS.COMPLETED, asset: null, liveNote: null },
+    { id: 2, coefficient: 0.6, status: STATUS.PENDING, asset: null, liveNote: null },
+  ];
+  let nextId = 3;
+
+  const moneyFmt = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function formatMoney(value, withSign) {
+    if (value === null || value === undefined || Number.isNaN(value)) return "—";
+    const sign = value < 0 ? "-" : (withSign && value > 0 ? "+" : "");
+    return sign + "$" + moneyFmt.format(Math.abs(value));
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const initialCapitalEl = $("initialCapital");
+  const hedgeUnitCostEl = $("hedgeUnitCost");
+  const hedgeVolumeEl = $("hedgeVolume");
+  const rowsBody = $("rowsBody");
+  const strategyNameEl = $("strategyName");
+
+  // ---------- расчёт цепочки ----------
+
+  function computeChain() {
+    const initialCapital = parseFloat(initialCapitalEl.value) || 0;
+    let carryBalance = initialCapital;
+    let unlocked = true;
+
+    return rows.map((row) => {
+      const reachable = unlocked;
+      const tradeAmount = reachable ? carryBalance : null;
+      const netProfit = reachable ? tradeAmount * row.coefficient : null;
+      const balanceAfter = reachable ? tradeAmount + netProfit : null;
+
+      // Подразумеваемая цена входа при выплате $1/акция:
+      // netProfit = tradeAmount*coef  =>  d = 1+coef (decimal odds),
+      // impliedPrice = 1/d, shares = tradeAmount/impliedPrice = balanceAfter.
+      const impliedPrice = reachable && (1 + row.coefficient) > 0 ? 1 / (1 + row.coefficient) : null;
+      const shares = reachable ? balanceAfter : null;
+
+      if (reachable) {
+        carryBalance = balanceAfter;
+        if (row.status !== STATUS.COMPLETED) unlocked = false;
+      } else {
+        unlocked = false;
+      }
+      return Object.assign({}, row, { reachable, tradeAmount, netProfit, balanceAfter, impliedPrice, shares });
+    });
+  }
+
+  function render() {
+    const computed = computeChain();
+
+    rowsBody.innerHTML = "";
+    if (computed.length === 0) {
+      rowsBody.innerHTML = '<tr class="empty-row"><td colspan="8">Цепочка пуста — добавьте первый этап.</td></tr>';
+    }
+
+    computed.forEach((row, idx) => {
+      const tr = document.createElement("tr");
+      if (!row.reachable) tr.classList.add("locked");
+
+      const lockNote = '<span class="lock-note"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><rect x="4.5" y="9" width="11" height="7.5" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M6.5 9V6.5a3.5 3.5 0 017 0V9" stroke="currentColor" stroke-width="1.4"/></svg>ожидание</span>';
+
+      const profitClass = row.reachable ? (row.netProfit >= 0 ? "profit" : "loss") : "";
+      const statusPillClass = row.status === STATUS.COMPLETED ? "status-pill-completed" : "status-pill-pending";
+
+      const impliedCell = row.reachable && row.impliedPrice !== null
+        ? `<span class="implied-cell">${(row.impliedPrice * 100).toFixed(1)}¢ → <b>${Math.round(row.shares).toLocaleString()}</b> шт.</span>`
+        : '<span class="implied-cell">—</span>';
+
+      const liveBtn = row.asset
+        ? `<button class="btn-ghost" data-live-id="${row.id}" title="Подтянуть текущий bid/ask с реального ордербука">книга</button>`
+        : "";
+      const liveNote = row.liveNote ? `<span class="live-tag" title="Реальный ордербук">${row.liveNote}</span>` : "";
+
+      tr.innerHTML = `
+        <td class="idx">${idx + 1}</td>
+        <td class="coef-cell">
+          <input type="number" step="0.01" data-id="${row.id}" data-field="coefficient" value="${row.coefficient}" ${row.reachable ? "" : "disabled"} placeholder="0.85" />
+        </td>
+        <td class="amount">${row.reachable ? formatMoney(row.tradeAmount) : lockNote}</td>
+        <td class="amount ${profitClass}">${row.reachable ? formatMoney(row.netProfit, true) : "—"}</td>
+        <td class="amount">${row.reachable ? formatMoney(row.balanceAfter) : "—"}</td>
+        <td>${impliedCell} ${liveBtn} ${liveNote}</td>
+        <td class="status-cell">
+          <select data-id="${row.id}" data-field="status" class="${statusPillClass}" ${row.reachable ? "" : "disabled"}>
+            <option value="${STATUS.COMPLETED}" ${row.status === STATUS.COMPLETED ? "selected" : ""}>Завершено</option>
+            <option value="${STATUS.PENDING}" ${row.status === STATUS.PENDING ? "selected" : ""}>В ожидании</option>
+          </select>
+        </td>
+        <td>
+          <button class="btn-remove" data-id="${row.id}" title="Удалить этап">
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="none"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </td>
+      `;
+      rowsBody.appendChild(tr);
+    });
+
+    const totalRevenue = computed.reduce((sum, r) => (r.reachable && r.status === STATUS.COMPLETED) ? sum + r.netProfit : sum, 0);
+    const hedgeCost = (parseFloat(hedgeUnitCostEl.value) || 0) * (parseFloat(hedgeVolumeEl.value) || 0);
+    const netPnl = totalRevenue - hedgeCost;
+
+    $("totalRevenue").textContent = formatMoney(totalRevenue, true);
+    $("hedgeCost").textContent = "-" + formatMoney(Math.abs(hedgeCost)).replace("-", "");
+
+    const pnlEl = $("netPnl");
+    pnlEl.textContent = formatMoney(netPnl, true);
+    pnlEl.className = "total-figure " + (netPnl >= 0 ? "profit" : "loss");
+    const pnlCard = $("pnlCard");
+    pnlCard.classList.remove("is-profit", "is-loss");
+    pnlCard.classList.add(netPnl >= 0 ? "is-profit" : "is-loss");
+
+    rowsBody.querySelectorAll("input[data-field], select[data-field]").forEach((el) => {
+      el.addEventListener("change", (e) => {
+        const id = parseFloat(e.target.dataset.id);
+        const field = e.target.dataset.field;
+        const row = rows.find((r) => r.id === id);
+        if (!row) return;
+        row[field] = field === "coefficient" ? (parseFloat(e.target.value) || 0) : e.target.value;
+        render();
+      });
+    });
+    rowsBody.querySelectorAll(".btn-remove").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = parseFloat(btn.dataset.id);
+        rows = rows.filter((r) => r.id !== id);
+        render();
+      });
+    });
+    rowsBody.querySelectorAll("[data-live-id]").forEach((btn) => {
+      btn.addEventListener("click", () => fetchLiveBook(parseFloat(btn.dataset.liveId)));
+    });
+  }
+
+  $("addRowBtn").addEventListener("click", () => {
+    rows.push({ id: nextId++, coefficient: 0, status: STATUS.PENDING, asset: null, liveNote: null });
+    render();
+  });
+
+  [initialCapitalEl, hedgeUnitCostEl, hedgeVolumeEl].forEach((el) => el.addEventListener("input", render));
+
+  // ---------- Polymarket: живые позиции ----------
+
+  const connStatus = $("connStatus");
+  const positionsList = $("positionsList");
+  const walletAddressEl = $("walletAddress");
+  const fetchBtn = $("fetchPositionsBtn");
+
+  const savedAddress = localStorage.getItem("evhedge_wallet_address");
+  if (savedAddress) walletAddressEl.value = savedAddress;
+
+  function pct(x) { return x === null || x === undefined ? "—" : (x * 100).toFixed(1) + "¢"; }
+
+  async function fetchPositions() {
+    const address = walletAddressEl.value.trim();
+    if (!address) {
+      connStatus.textContent = "Введите адрес кошелька (0x...)";
+      connStatus.classList.add("err");
+      return;
+    }
+    localStorage.setItem("evhedge_wallet_address", address);
+    connStatus.classList.remove("err");
+    connStatus.textContent = "Загрузка...";
+    fetchBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/positions?address=${encodeURIComponent(address)}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "неизвестная ошибка");
+      renderPositions(data);
+      connStatus.textContent = data.length
+        ? `Найдено открытых позиций: ${data.length}`
+        : "Открытых позиций не найдено для этого адреса.";
+    } catch (err) {
+      connStatus.classList.add("err");
+      connStatus.textContent = "Ошибка: " + err.message;
+      positionsList.innerHTML = "";
+    } finally {
+      fetchBtn.disabled = false;
+    }
+  }
+
+  function renderPositions(positions) {
+    positionsList.innerHTML = "";
+    positions.forEach((p) => {
+      const div = document.createElement("div");
+      div.className = "position-row";
+      div.innerHTML = `
+        <div class="pos-main">
+          <div class="pos-title">${p.title || "—"} — ${p.outcome || "?"}</div>
+          <div class="pos-sub">${(p.size || 0).toFixed(2)} шт. · вход ${pct(p.avgPrice)} · тек. цена ${pct(p.curPrice)} · вложено ${formatMoney(p.initialValue)}</div>
+        </div>
+        <button class="btn-accent" data-load-slug="${p.slug || ""}">Загрузить</button>
+      `;
+      div.querySelector("button").addEventListener("click", () => loadPositionIntoChain(p));
+      positionsList.appendChild(div);
+    });
+  }
+
+  function loadPositionIntoChain(p) {
+    strategyNameEl.value = p.title || strategyNameEl.value;
+    initialCapitalEl.value = (p.initialValue || 0).toFixed(2);
+    if (rows.length > 0) {
+      rows[0].asset = p.asset || null;
+      rows[0].liveNote = null;
+    }
+    render();
+    connStatus.classList.remove("err");
+    connStatus.textContent = `Загружено: "${p.title}" (${p.outcome}) → строка 1 привязана к живому ордербоку.`;
+  }
+
+  async function fetchLiveBook(rowId) {
+    const row = rows.find((r) => r.id === rowId);
+    if (!row || !row.asset) return;
+    try {
+      const resp = await fetch(`/api/book?token_id=${encodeURIComponent(row.asset)}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "ошибка книги");
+      row.liveNote = data.bid !== null && data.ask !== null
+        ? `bid ${pct(data.bid)} / ask ${pct(data.ask)}`
+        : "книга пуста";
+    } catch (err) {
+      row.liveNote = "ошибка: " + err.message;
+    }
+    render();
+  }
+
+  fetchBtn.addEventListener("click", fetchPositions);
+
+  render();
+  if (savedAddress) fetchPositions();
+</script>
+</body>
+</html>

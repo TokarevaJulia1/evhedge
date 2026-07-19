@@ -641,6 +641,20 @@ def pull_command(
     console.print(table)
 
 
+@main.command("webapp")
+@click.option("--port", type=int, default=8787, show_default=True, help="Local port to serve on.")
+def webapp_command(port: int) -> None:
+    """Launch the local Roll-Over Chain dashboard at http://127.0.0.1:PORT.
+
+    Serves the calculator page plus a thin JSON API over live Polymarket
+    data (open positions by wallet address, order book by token id) --
+    localhost-only, read-only, no order placement.
+    """
+    from evhedge.webapp import run_server
+
+    run_server(port=port)
+
+
 @main.command("resolve")
 @click.argument("tournament")
 @click.argument("team")

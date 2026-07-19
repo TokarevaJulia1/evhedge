@@ -18,6 +18,7 @@ from evhedge.data_sources.polymarket import (
     executable_size,
     fetch_event_by_slug,
     fetch_order_book,
+    fetch_positions,
     fetch_tournament_markets,
 )
 
@@ -116,6 +117,28 @@ def test_fetch_event_by_slug_returns_first_match(monkeypatch):
         "evhedge.data_sources.polymarket._get", lambda url, params=None: [{"slug": "x"}]
     )
     assert fetch_event_by_slug("x") == {"slug": "x"}
+
+
+def test_fetch_positions_passes_address_and_returns_raw_list(monkeypatch):
+    captured = {}
+
+    def fake_get(url, params=None):
+        captured["url"] = url
+        captured["params"] = params
+        return [{"title": "T", "outcome": "Yes", "size": 10.0, "asset": "tok1"}]
+
+    monkeypatch.setattr("evhedge.data_sources.polymarket._get", fake_get)
+
+    positions = fetch_positions("0xabc")
+    assert positions == [{"title": "T", "outcome": "Yes", "size": 10.0, "asset": "tok1"}]
+    assert captured["url"].endswith("/positions")
+    assert captured["params"] == {"user": "0xabc", "limit": 500}
+
+
+def test_fetch_positions_raises_on_bad_shape(monkeypatch):
+    monkeypatch.setattr("evhedge.data_sources.polymarket._get", lambda url, params=None: {"not": "a list"})
+    with pytest.raises(PolymarketAPIError, match="неожиданный формат"):
+        fetch_positions("0xabc")
 
 
 def test_fetch_order_book_parses_levels(monkeypatch):
