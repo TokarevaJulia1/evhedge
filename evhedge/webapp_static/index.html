@@ -442,13 +442,33 @@
   function loadPositionIntoChain(p) {
     strategyNameEl.value = p.title || strategyNameEl.value;
     initialCapitalEl.value = (p.initialValue || 0).toFixed(2);
+
     if (rows.length > 0) {
       rows[0].asset = p.asset || null;
       rows[0].liveNote = null;
+
+      if (p.redeemable) {
+        // Рынок реально резолвнулся -- коэффициент считаем из ФАКТИЧЕСКОГО
+        // исхода (currentValue/initialValue), а не оставляем дефолтные
+        // 0.85/"Завершено" от пустой строки. initialValue=0 -- защита от
+        // деления на ноль (не должно случаться у реальной позиции).
+        const realized = p.initialValue ? (p.currentValue - p.initialValue) / p.initialValue : 0;
+        rows[0].coefficient = Math.round(realized * 10000) / 10000;
+        rows[0].status = STATUS.COMPLETED;
+      } else {
+        // Рынок ещё не резолвнулся -- реального исхода нет, коэффициент
+        // фиктивным не оставляем, статус явно "В ожидании".
+        rows[0].coefficient = 0;
+        rows[0].status = STATUS.PENDING;
+      }
     }
+
     render();
     connStatus.classList.remove("err");
-    connStatus.textContent = `Загружено: "${p.title}" (${p.outcome}) → строка 1 привязана к живому ордербоку.`;
+    const outcomeNote = p.redeemable
+      ? `фактический результат: ${(rows[0].coefficient * 100).toFixed(1)}%`
+      : "рынок ещё не резолвнулся, коэффициент введите вручную после исхода";
+    connStatus.textContent = `Загружено: "${p.title}" (${p.outcome}) → строка 1 привязана к живому ордербоку, ${outcomeNote}.`;
   }
 
   async function fetchLiveBook(rowId) {
