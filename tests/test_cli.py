@@ -883,3 +883,116 @@ def test_stageranks_suggest_apply_writes_file(tmp_path):
     from evhedge.auto_predict import load_stage_ranks
     new_ranks = load_stage_ranks(ranks_path)
     assert new_ranks == {"A": 3, "B": 3}
+
+
+# --- scenarios ---------------------------------------------------------------------
+
+def _seed_book_yes(store, team, bid_pct, ask_pct, tournament):
+    from evhedge.storage import PriceSnapshot
+    store.record_snapshot(PriceSnapshot(
+        tournament=tournament, team=team, market="winner_yes", price_pct=ask_pct,
+        bid_pct=bid_pct, ask_pct=ask_pct, source="book", ts_utc=T0,
+    ))
+
+
+def test_scenarios_command_reports_titles_and_conflicts(tmp_path):
+    from evhedge.storage import Storage
+
+    db = tmp_path / "e.db"
+    tournament = "BLAST Bounty 2026 Season 2"
+    teams = [("A", 30.0, 31.0), ("B", 10.0, 11.0), ("C", 20.0, 21.0), ("D", 5.0, 6.0),
+              ("E", 15.0, 16.0), ("F", 8.0, 9.0), ("G", 12.0, 13.0), ("H", 4.0, 5.0)]
+    with Storage(db) as store:
+        for team, bid, ask in teams:
+            _seed_book_yes(store, team, bid, ask, tournament)
+
+    ranks_path = tmp_path / "ranks.yaml"
+    ranks_path.write_text("\n".join(f'"{t}": 3' for t, _, _ in teams) + "\n", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "scenarios", "--db", str(db), "--tournament", tournament,
+        "--ranks", str(ranks_path),
+        "--teams", "A,B,C,D,E,F,G,H",
+        "--flag", "A,C",
+    ])
+    assert result.exit_code == 0
+    assert "Traceback" not in result.output
+    assert "A" in result.output and "C" in result.output
+    assert "SF" in result.output  # A vs C conflict is in the same half, different QF -> SF
+    assert "не ставятся" in result.output
+
+
+def test_scenarios_command_emit_configs_writes_files(tmp_path):
+    from evhedge.storage import Storage
+
+    db = tmp_path / "e.db"
+    tournament = "BLAST Bounty 2026 Season 2"
+    teams = [("A", 30.0, 31.0), ("B", 10.0, 11.0), ("C", 20.0, 21.0), ("D", 5.0, 6.0),
+              ("E", 15.0, 16.0), ("F", 8.0, 9.0), ("G", 12.0, 13.0), ("H", 4.0, 5.0)]
+    with Storage(db) as store:
+        for team, bid, ask in teams:
+            _seed_book_yes(store, team, bid, ask, tournament)
+
+    ranks_path = tmp_path / "ranks.yaml"
+    ranks_path.write_text("\n".join(f'"{t}": 3' for t, _, _ in teams) + "\n", encoding="utf-8")
+    out_dir = tmp_path / "emitted"
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "scenarios", "--db", str(db), "--tournament", tournament,
+        "--ranks", str(ranks_path), "--teams", "A,B,C,D,E,F,G,H",
+        "--flag", "A", "--emit-configs", "--out-dir", str(out_dir),
+    ])
+    assert result.exit_code == 0
+    emitted = out_dir / "a_stage2_scenario.yaml"
+    assert emitted.exists()
+
+    from evhedge.config_io import load_full_config
+    bracket, market, strategy = load_full_config(emitted)
+    assert bracket.team == "A"
+
+
+def test_scenarios_command_rejects_nonuniform_ranks(tmp_path):
+    from evhedge.storage import Storage
+
+    db = tmp_path / "e.db"
+    tournament = "BLAST Bounty 2026 Season 2"
+    teams = [("A", 30.0, 31.0), ("B", 10.0, 11.0), ("C", 20.0, 21.0), ("D", 5.0, 6.0),
+              ("E", 15.0, 16.0), ("F", 8.0, 9.0), ("G", 12.0, 13.0), ("H", 4.0, 5.0)]
+    with Storage(db) as store:
+        for team, bid, ask in teams:
+            _seed_book_yes(store, team, bid, ask, tournament)
+
+    ranks_path = tmp_path / "ranks.yaml"
+    lines = [f'"{t}": 3' for t, _, _ in teams]
+    lines[0] = '"A": 4'  # A is stale/non-uniform
+    ranks_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "scenarios", "--db", str(db), "--tournament", tournament,
+        "--ranks", str(ranks_path), "--teams", "A,B,C,D,E,F,G,H",
+    ])
+    assert result.exit_code != 0
+    assert "неоднород" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_scenarios_command_without_teams_needs_ps_data(tmp_path):
+    """Auto-detect path: with no synced ps_results QF matches, a clean
+    UsageError, not a crash."""
+    from evhedge.storage import Storage
+
+    db = tmp_path / "e.db"
+    with Storage(db):
+        pass
+    ranks_path = tmp_path / "ranks.yaml"
+    ranks_path.write_text('"A": 3\n', encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "scenarios", "--db", str(db), "--tournament", "T", "--ranks", str(ranks_path),
+    ])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output

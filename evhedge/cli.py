@@ -1303,6 +1303,134 @@ def stageranks_suggest_command(
     console.print(f"Записано в {ranks_path} ({len(new_ranks)} команд).")
 
 
+@main.command("scenarios")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", required=True, help="Tournament label.")
+@click.option(
+    "--ranks", "ranks_path", type=click.Path(path_type=Path), required=True,
+    help="stage_ranks YAML -- the 8 seeded teams' shared n (QF); SF/GF derived as n-1/n-2.",
+)
+@click.option(
+    "--teams", "teams_csv", default=None,
+    help='8 comma-separated teams in bracket order "QF1a,QF1b,QF2a,QF2b,QF3a,QF3b,QF4a,QF4b". '
+    "Omit to auto-detect from ps_results (needs exactly 4 QF-stage matches already synced).",
+)
+@click.option(
+    "--flag", "flagged_csv", default=None,
+    help="Comma-separated subset of the 8 to show the conflict map / emit configs for (default: all 8).",
+)
+@click.option("--emit-configs", is_flag=True, default=False, help="Write draft evhedge-ev YAMLs.")
+@click.option(
+    "--out-dir", type=click.Path(path_type=Path), default=Path("examples"), show_default=True,
+    help="Directory for --emit-configs output.",
+)
+def scenarios_command(
+    db_path: Path, tournament: str, ranks_path: Path, teams_csv: Optional[str],
+    flagged_csv: Optional[str], emit_configs: bool, out_dir: Path,
+) -> None:
+    """Stage-2 fixed-bracket scenario tree: once 8 teams seed into a
+    standard single-elim QF/SF/GF, enumerate all 128 possible outcomes
+    from real winner-book mids, report each team's title probability,
+    and (optionally) emit draft evhedge-ev configs for flagged teams."""
+    from evhedge.auto_predict import load_stage_ranks
+    from evhedge.scenarios import (
+        ScenarioError,
+        detect_qf_pairs,
+        emit_bracket_config,
+        enumerate_stage2_scenarios,
+        latest_book_no_ask,
+        make_win_prob_fn,
+        stage_conflict,
+        team_outlooks,
+    )
+
+    try:
+        current_ranks = load_stage_ranks(ranks_path)
+    except ConfigError as e:
+        error_console.print(f"Ошибка --ranks: {e}")
+        sys.exit(1)
+
+    try:
+        with Storage(db_path) as store:
+            if teams_csv:
+                teams = [t.strip() for t in teams_csv.split(",")]
+                if len(teams) != 8:
+                    raise click.UsageError(f"--teams должен содержать ровно 8 команд, получено {len(teams)}")
+                pairs = [(teams[0], teams[1]), (teams[2], teams[3]),
+                         (teams[4], teams[5]), (teams[6], teams[7])]
+            else:
+                pairs = detect_qf_pairs(store, tournament)
+
+            all_teams = [t for pair in pairs for t in pair]
+
+            ns = {t: current_ranks.get(t) for t in all_teams}
+            missing = [t for t, n in ns.items() if n is None]
+            if missing:
+                raise click.UsageError(f"нет n в --ranks для: {missing}")
+            distinct_n = set(ns.values())
+            if len(distinct_n) != 1:
+                raise click.UsageError(
+                    f"n неоднороден среди 8 посеянных команд ({ns}) -- сценарное дерево "
+                    f"требует единой стадии входа для всех"
+                )
+            qf_n = distinct_n.pop()
+            stage_n = {"QF": qf_n, "SF": qf_n - 1, "GF": qf_n - 2}
+            if stage_n["GF"] < 1:
+                raise click.UsageError(f"n={qf_n} слишком мал для 3 раундов QF/SF/GF")
+
+            win_prob_fn = make_win_prob_fn(store, tournament, stage_n)
+            paths = enumerate_stage2_scenarios(pairs, win_prob_fn)
+            outlooks = team_outlooks(paths, all_teams)
+
+            flagged = [t.strip() for t in flagged_csv.split(",")] if flagged_csv else all_teams
+
+            configs_written = []
+            if emit_configs:
+                for team in flagged:
+                    no_price = latest_book_no_ask(store, tournament, team)
+                    if no_price is None:
+                        no_price = 1.0 - outlooks[team].p_title  # last-resort: model complement
+                    path = emit_bracket_config(
+                        team, outlooks[team], tournament, "esports", no_price, out_dir,
+                    )
+                    configs_written.append(path)
+    except (ScenarioError, StorageError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    table = Table(title=f"scenarios — {tournament} (n={qf_n}/{qf_n-1}/{qf_n-2} по QF/SF/GF)")
+    table.add_column("Команда")
+    table.add_column("P(титул)", justify="right")
+    table.add_column("P(QF)", justify="right")
+    table.add_column("P(SF|дошла)", justify="right")
+    table.add_column("P(GF|дошла)", justify="right")
+    for team, o in sorted(outlooks.items(), key=lambda kv: -kv[1].p_title):
+        def _fmt(p):
+            return f"{p*100:.1f}%" if p is not None else "—"
+        table.add_row(team, f"{o.p_title*100:.1f}%", _fmt(o.stage_win_prob["QF"]),
+                       _fmt(o.stage_win_prob["SF"]), _fmt(o.stage_win_prob["GF"]))
+    console.print(table)
+
+    conflict_table = Table(title="Карта конфликтов (детерминировано по слотам сетки)")
+    conflict_table.add_column("Команда A")
+    conflict_table.add_column("Команда B")
+    conflict_table.add_column("Возможная встреча на")
+    for i, a in enumerate(flagged):
+        for b in flagged[i + 1:]:
+            stage = stage_conflict(pairs, a, b)
+            if stage:
+                conflict_table.add_row(a, b, stage)
+    console.print(conflict_table)
+    warn_console.print("На очный матч между двумя флагнутыми командами ноги не ставятся.")
+
+    if emit_configs:
+        for path in configs_written:
+            console.print(f"Черновик записан: {path}")
+
+
 @main.group("aliases")
 def aliases_group() -> None:
     """Team name alias tools: discover discrepancies, sanity-check a
