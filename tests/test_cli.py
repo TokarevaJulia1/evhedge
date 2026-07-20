@@ -735,3 +735,90 @@ def test_score_command_pending_excluded_from_metrics(tmp_path):
         assert len(report.pending) == 1
         assert report.pending[0].team == "StillPending"
     assert "Traceback" not in result.output
+
+
+# --- pandascore sync / reconcile / deadlines --------------------------------------
+
+_PS_MATCH_DECIDED = {
+    "id": 1579768, "name": "Grand final: TYLOO vs LV", "status": "finished",
+    "winner_id": 999, "begin_at": "2026-07-12T06:49:51Z",
+    "scheduled_at": "2026-07-12T06:50:00Z", "number_of_games": 3,
+    "match_type": "best_of", "tournament": {"id": 1, "name": "Playoffs", "tier": "a"},
+    "results": [{"team_id": 888, "score": 1}, {"team_id": 999, "score": 2}],
+    "opponents": [
+        {"type": "Team", "opponent": {"id": 888, "name": "TYLOO", "acronym": "TYL"}},
+        {"type": "Team", "opponent": {"id": 999, "name": "Lynn Vision", "acronym": "LV"}},
+    ],
+}
+
+
+def test_pandascore_sync_requires_league_or_serie_id(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "pandascore", "sync", "--db", str(tmp_path / "e.db"), "--tournament", "T",
+    ])
+    assert result.exit_code != 0
+    assert "league-id" in result.output or "serie-id" in result.output
+
+
+def test_pandascore_sync_writes_ps_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.pandascore_sync.pandascore_ds.fetch_matches",
+        lambda status, budget, league_id=None, serie_id=None, max_pages=None: (
+            [_PS_MATCH_DECIDED] if status == "past" else []
+        ),
+    )
+    db = tmp_path / "e.db"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "pandascore", "sync", "--db", str(db), "--tournament", "T",
+        "--league-id", "5370", "--status", "upcoming", "--status", "past",
+    ])
+    assert result.exit_code == 0
+    assert "записано 1" in result.output
+
+    from evhedge.storage import Storage
+
+    with Storage(db) as store:
+        rows = store.ps_results(tournament="T")
+        assert len(rows) == 1
+        assert rows[0].winner == "Lynn Vision"
+
+
+def test_reconcile_command_reports_warning(tmp_path):
+    from evhedge.storage import PSResult, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_ps_result(PSResult(
+            ps_match_id=1, tournament="T", team_a="A", team_b="B", winner="A",
+            score_a=2, score_b=0, stage="Playoffs", best_of=3, status="finished",
+            ts_utc=ts, begin_at=ts - timedelta(hours=5),
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reconcile", "--db", str(db), "--tournament", "T"])
+    assert result.exit_code == 0
+    assert "предупреждений: 1" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_deadlines_command_flags_soon_uncovered_match(tmp_path):
+    from evhedge.storage import PSResult, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_ps_result(PSResult(
+            ps_match_id=1, tournament="T", team_a="A", team_b="B",
+            stage="Ro32", best_of=3, status="not_started", ts_utc=ts,
+            scheduled_at=ts + timedelta(hours=1),
+        ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["deadlines", "--db", str(db), "--tournament", "T", "--hours", "3"])
+    assert result.exit_code == 0
+    assert "СКОРО" in result.output
+    assert "1 матч" in result.output
+    assert "Traceback" not in result.output

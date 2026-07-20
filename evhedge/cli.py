@@ -37,6 +37,7 @@ from evhedge.consistency import (
     run_board_checks,
 )
 from evhedge.data_sources import polymarket as polymarket_ds
+from evhedge.pandascore_sync import DEFAULT_DEADLINE_HOURS
 from evhedge.data_sources.pinnacle import devig_range
 from evhedge.data_sources.polymarket import PolymarketAPIError
 from evhedge.engine import compute_ev
@@ -653,6 +654,146 @@ def webapp_command(port: int) -> None:
     from evhedge.webapp import run_server
 
     run_server(port=port)
+
+
+@main.group("pandascore")
+def pandascore_group() -> None:
+    """PandaScore sync: schedules/results independent of Polymarket."""
+
+
+@pandascore_group.command("sync")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", required=True, help="OUR canonical tournament label to record under.")
+@click.option("--league-id", type=int, default=None, help="PandaScore league_id filter.")
+@click.option("--serie-id", type=int, default=None, help="PandaScore serie_id filter.")
+@click.option(
+    "--status", "statuses", multiple=True, default=("upcoming", "running", "past"),
+    show_default=True, help="Match status(es) to pull (repeatable): upcoming/running/past.",
+)
+def pandascore_sync_command(
+    db_path: Path, tournament: str, league_id: Optional[int], serie_id: Optional[int],
+    statuses: tuple[str, ...],
+) -> None:
+    """Pull matches from PandaScore into the local ps_results mirror --
+    the fast, offline-afterward source ``reconcile``/``deadlines`` read
+    from. Run this periodically (e.g. alongside ``pull``); it does not
+    itself touch ``resolves`` or ``predictions``."""
+    from evhedge.data_sources.pandascore import PandaScoreError
+    from evhedge.pandascore_sync import sync_matches
+
+    if league_id is None and serie_id is None:
+        raise click.UsageError("нужен хотя бы один из --league-id / --serie-id")
+
+    try:
+        with Storage(db_path) as store:
+            summary = sync_matches(
+                store, tournament, league_id=league_id, serie_id=serie_id, statuses=statuses,
+            )
+    except (PandaScoreError, StorageError) as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    console.print(
+        f"pandascore sync — {tournament}: увидено {summary.matches_seen}, "
+        f"записано {summary.matches_written}, пропущено (не 2 команды) "
+        f"{summary.skipped_shape}, запросов PandaScore: {summary.requests_made}, "
+        f"остаток бюджета: {summary.rate_limit_remaining}"
+    )
+
+
+@main.command("reconcile")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", required=True, help="Tournament to reconcile.")
+def reconcile_command(db_path: Path, tournament: str) -> None:
+    """Compare PandaScore's sporting results (``ps_results``, already
+    synced via ``pandascore sync``) against Gamma's market resolves --
+    flags a lag/gap, never corrects one. resolves stays the market's own
+    truth (see storage.PSResult's docstring)."""
+    from evhedge.pandascore_sync import reconcile
+
+    try:
+        with Storage(db_path) as store:
+            report = reconcile(store, tournament)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    table = Table(title=f"reconcile — {tournament}")
+    table.add_column("Матч")
+    table.add_column("Стадия")
+    table.add_column("PS победитель")
+    table.add_column("Gamma резолв")
+    table.add_column("Предупреждение")
+    for row in report.rows:
+        table.add_row(
+            f"{row.team_a} vs {row.team_b}", row.stage, row.ps_winner or "—",
+            "да" if row.gamma_resolved else "нет", row.warning or "",
+        )
+    console.print(table)
+    console.print(f"OK: {report.n_ok}, предупреждений: {report.n_warnings}")
+    if report.n_warnings:
+        warn_console.print(
+            f"{report.n_warnings} матч(ей) PandaScore считает завершёнными, "
+            f"но Gamma-резолва пока нет — не факт ошибки, но стоит проверить."
+        )
+
+
+@main.command("deadlines")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB file.",
+)
+@click.option("--tournament", required=True, help="Tournament to list deadlines for.")
+@click.option(
+    "--hours", "hours_threshold", type=float, default=None,
+    help=f"Flag legs starting within N hours with no prediction yet (default: {DEFAULT_DEADLINE_HOURS}).",
+)
+def deadlines_command(db_path: Path, tournament: str, hours_threshold: Optional[float]) -> None:
+    """Upcoming legs (from the PandaScore mirror), soonest first, flagged
+    when starting soon with no ``predictions`` row -- a direct "book not
+    caught yet" indicator. Decides nothing; just the list and the clock."""
+    from evhedge.pandascore_sync import upcoming_deadlines
+
+    threshold = hours_threshold if hours_threshold is not None else DEFAULT_DEADLINE_HOURS
+
+    try:
+        with Storage(db_path) as store:
+            rows = upcoming_deadlines(store, tournament, hours_threshold=threshold)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    table = Table(title=f"deadlines — {tournament}")
+    table.add_column("Матч")
+    table.add_column("Стадия")
+    table.add_column("Bo")
+    table.add_column("Часов до старта", justify="right")
+    table.add_column("Прогноз есть?")
+    for row in rows:
+        flagged = (
+            row.hours_until is not None and row.hours_until <= threshold and not row.has_prediction
+        )
+        hours_str = f"{row.hours_until:.1f}" if row.hours_until is not None else "—"
+        table.add_row(
+            f"{row.team_a} vs {row.team_b}", row.stage, f"Bo{row.best_of}",
+            hours_str, "нет — СКОРО" if flagged else ("да" if row.has_prediction else "нет"),
+        )
+    console.print(table)
+
+    flagged_count = sum(
+        1 for r in rows if r.hours_until is not None and r.hours_until <= threshold and not r.has_prediction
+    )
+    if flagged_count:
+        warn_console.print(
+            f"{flagged_count} матч(ей) стартует в пределах {threshold}ч без прогноза — "
+            f"либо автопредикт ещё не взял книгу, либо книги ещё нет."
+        )
 
 
 @main.command("resolve")

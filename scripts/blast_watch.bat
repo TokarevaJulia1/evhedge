@@ -37,6 +37,20 @@ rem prediction fixed against a stale n is a permanently lost calibration
 rem point. Update it BEFORE the next round's books list (evening after
 rem results, ahead of the next morning's listings) -- checked via
 rem `evhedge autopredict status`'s "с моделью" column.
+rem
+rem PandaScore step (independent source: schedules/results, deadline
+rem warnings) needs PANDASCORE_TOKEN set in THIS environment before the
+rem loop starts -- not committed anywhere, set it yourself
+rem (`set PANDASCORE_TOKEN=...` before running this script, or a
+rem permanent user/system env var).
+rem --league-id 4321 = BLAST Premier (the parent league, confirmed live
+rem 2026-07-20) -- PandaScore had NOT yet created a "BLAST Bounty 2026
+rem Season 2" series/matches as of that check (same timing gap as the
+rem Gamma match-listing one above); syncing by league_id returns 0 rows
+rem harmlessly until PandaScore adds it, no code change needed then.
+rem `deadlines --hours 2` prints its own warning (via warn_console) for
+rem any leg starting inside 2h with no predictions row yet -- that IS
+rem the watcher-loop warning-log requirement, not a separate mechanism.
 rem =========================================================================
 
 cd /d "%~dp0.."
@@ -50,6 +64,16 @@ python -m evhedge.cli pull --tournament "BLAST Bounty 2026 Season 2" ^
   --db data\blast2026.db ^
   --stage-ranks configs\blast_bounty_s2_stage_ranks.yaml
 if errorlevel 1 echo [%date% %time%] pull failed (network?) -- retrying in 15 min.
+
+echo [%date% %time%] evhedge pandascore sync...
+python -m evhedge.cli pandascore sync --db data\blast2026.db ^
+  --tournament "BLAST Bounty 2026 Season 2" --league-id 4321
+if errorlevel 1 (
+  echo [%date% %time%] pandascore sync failed -- PANDASCORE_TOKEN set? network?
+) else (
+  python -m evhedge.cli deadlines --db data\blast2026.db ^
+    --tournament "BLAST Bounty 2026 Season 2" --hours 2
+)
 
 timeout /t 900 /nobreak >nul
 goto loop

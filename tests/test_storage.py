@@ -451,7 +451,7 @@ def test_v6_to_v7_migration_creates_predictions_table_and_keeps_data(tmp_path):
 
     with Storage(db) as store:
         (version,) = store._conn.execute("PRAGMA user_version").fetchone()
-        assert version == SCHEMA_VERSION == 7
+        assert version == SCHEMA_VERSION  # whatever the latest schema version now is
 
         # pre-existing data untouched
         assert len(store.resolves("EWC", team="Falcons", market="winner_no")) == 1
@@ -468,3 +468,58 @@ def test_v6_to_v7_migration_creates_predictions_table_and_keeps_data(tmp_path):
         (version,) = store._conn.execute("PRAGMA user_version").fetchone()
         assert version == SCHEMA_VERSION
         assert len(store.predictions(tournament="EWC")) == 1
+
+
+def test_v7_to_v8_migration_creates_ps_results_table_and_keeps_data(tmp_path):
+    """Simulates a v7 database with existing predictions data and checks
+    the migration adds ``ps_results`` without touching anything else,
+    plus that record_ps_result's upsert-by-ps_match_id actually works
+    (re-recording the same match_id updates in place, no duplicate)."""
+    import sqlite3
+
+    from evhedge.storage import PSResult, _MIGRATIONS, SCHEMA_VERSION
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    for i in range(7):  # v0 -> v7
+        step = _MIGRATIONS[i]
+        if callable(step):
+            step(conn)
+        else:
+            conn.executescript(step)
+    conn.execute(
+        "INSERT INTO predictions (ts_utc, tournament, team, market, p_model)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (T0.isoformat(), "EWC", "Falcons", "winner_no", 0.1),
+    )
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+    with Storage(db) as store:
+        (version,) = store._conn.execute("PRAGMA user_version").fetchone()
+        assert version == SCHEMA_VERSION == 8
+
+        # pre-existing data untouched
+        assert len(store.predictions(tournament="EWC")) == 1
+
+        # ps_results table is usable, and upserts by ps_match_id
+        store.record_ps_result(PSResult(
+            ps_match_id=42, tournament="EWC", team_a="A", team_b="B",
+            stage="Group A", best_of=3, status="not_started", ts_utc=T0,
+        ))
+        store.record_ps_result(PSResult(
+            ps_match_id=42, tournament="EWC", team_a="A", team_b="B",
+            stage="Group A", best_of=3, status="finished", winner="A",
+            score_a=2, score_b=0, ts_utc=T0,
+        ))
+        rows = store.ps_results(tournament="EWC")
+        assert len(rows) == 1
+        assert rows[0].status == "finished"
+        assert rows[0].winner == "A"
+
+    # idempotent
+    with Storage(db) as store:
+        (version,) = store._conn.execute("PRAGMA user_version").fetchone()
+        assert version == SCHEMA_VERSION
+        assert len(store.ps_results(tournament="EWC")) == 1

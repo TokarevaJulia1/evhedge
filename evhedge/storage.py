@@ -382,6 +382,93 @@ class ScoreReport:
     pin_range_hit_rate: Optional[float]
 
 
+@dataclass
+class PSResult:
+    """A mirror of one PandaScore match's current state -- schedule,
+    stage, and (once decided) result. Independent of Polymarket: this is
+    "sporting truth" for speed and reconciliation, NOT the truth this
+    project trades on. DESIGN CHOICE: ``Storage.record_ps_result`` never
+    writes into ``resolves`` -- ``resolves`` stays exactly what it always
+    was, a record of how the MARKET resolved (Gamma), because a market
+    can in principle resolve differently from (or later than) the
+    real-world sporting outcome (disputes, technical forfeits, an oracle
+    lag). ``evhedge reconcile`` is what compares the two and flags a gap
+    -- as a warning to look at, never as an automatic correction.
+
+    Unlike ``Prediction``, this is NOT immutable: it's a refreshable
+    cache of PandaScore's own current state, re-upserted by
+    ``ps_match_id`` on every sync pass (a match's score/status/winner
+    genuinely change as it's played -- there is no calibration integrity
+    to protect here, only currency).
+
+    Attributes:
+        ps_match_id: PandaScore's own match id -- the natural key.
+        tournament: OUR canonical tournament label (matches
+            ``Resolve.tournament``/``Prediction.tournament``), not
+            PandaScore's own League/Series/Tournament naming.
+        team_a/team_b: Canonical team names (``team_aliases``).
+        winner: Canonical name of the winning team, or ``None``
+            (unplayed, draw, or forfeit-with-no-winner).
+        score_a/score_b: Map score (games won), or ``None`` before any
+            game completes.
+        stage: PandaScore's ``tournament.name`` (their "Tournament" =
+            our "stage", e.g. "Group A", "Playoffs" -- see
+            ``data_sources.pandascore`` module docstring).
+        best_of: ``number_of_games`` from PandaScore (3 for Bo3, ...).
+        status: PandaScore's own match status string
+            ("not_started"/"running"/"finished"/"canceled"/...), passed
+            through verbatim -- never re-interpreted here.
+        begin_at: Actual start once the match has genuinely begun,
+            ``None`` before that.
+        scheduled_at: PandaScore's PLANNED start time -- set as soon as
+            a match is created, well before ``begin_at``. This is what
+            ``evhedge deadlines`` counts hours against; ``begin_at``
+            alone would be useless for an upcoming match (it's null
+            until the match is actually live).
+    """
+
+    ps_match_id: int
+    tournament: str
+    team_a: str
+    team_b: str
+    stage: str
+    best_of: int
+    status: str
+    ts_utc: datetime
+    winner: Optional[str] = None
+    score_a: Optional[int] = None
+    score_b: Optional[int] = None
+    begin_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = None
+    id: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.ts_utc.tzinfo is None:
+            raise StorageError(f"PSResult(ps_match_id={self.ps_match_id}).ts_utc must be timezone-aware")
+        self.ts_utc = self.ts_utc.astimezone(timezone.utc)
+        for label in ("begin_at", "scheduled_at"):
+            value = getattr(self, label)
+            if value is not None:
+                if value.tzinfo is None:
+                    raise StorageError(
+                        f"PSResult(ps_match_id={self.ps_match_id}).{label} must be timezone-aware"
+                    )
+                setattr(self, label, value.astimezone(timezone.utc))
+
+
+def _row_to_ps_result(row: sqlite3.Row) -> PSResult:
+    return PSResult(
+        ps_match_id=row["ps_match_id"], tournament=row["tournament"],
+        team_a=row["team_a"], team_b=row["team_b"], stage=row["stage"],
+        best_of=row["best_of"], status=row["status"],
+        ts_utc=datetime.fromisoformat(row["ts_utc"]),
+        winner=row["winner"], score_a=row["score_a"], score_b=row["score_b"],
+        begin_at=datetime.fromisoformat(row["begin_at"]) if row["begin_at"] else None,
+        scheduled_at=datetime.fromisoformat(row["scheduled_at"]) if row["scheduled_at"] else None,
+        id=row["id"],
+    )
+
+
 def _row_to_prediction(row: sqlite3.Row) -> Prediction:
     return Prediction(
         tournament=row["tournament"], team=row["team"], market=row["market"],
@@ -538,6 +625,33 @@ _MIGRATIONS: list = [
         outcome_ts    TEXT
     );
     CREATE UNIQUE INDEX idx_predictions_unique ON predictions (tournament, team, market);
+    """,
+    # v7 -> v8: ps_results -- a refreshable mirror of PandaScore match
+    # state (schedule/stage/result), independent of Polymarket. UNIQUE on
+    # ps_match_id makes Storage.record_ps_result an upsert (unlike
+    # predictions, this table is NOT immutable -- a match's score/status
+    # genuinely changes as it's played). Never written into `resolves`
+    # -- see PSResult's docstring on why the two stay separate sources
+    # of truth (market resolution vs sporting result), reconciled by
+    # `evhedge reconcile`, not merged.
+    """
+    CREATE TABLE ps_results (
+        id           INTEGER PRIMARY KEY,
+        ts_utc       TEXT NOT NULL,
+        ps_match_id  INTEGER NOT NULL,
+        tournament   TEXT NOT NULL,
+        team_a       TEXT NOT NULL,
+        team_b       TEXT NOT NULL,
+        winner       TEXT,
+        score_a      INTEGER,
+        score_b      INTEGER,
+        stage        TEXT NOT NULL,
+        best_of      INTEGER NOT NULL,
+        status       TEXT NOT NULL,
+        begin_at     TEXT,
+        scheduled_at TEXT
+    );
+    CREATE UNIQUE INDEX idx_ps_results_unique ON ps_results (ps_match_id);
     """,
 ]
 
@@ -1045,3 +1159,57 @@ class Storage:
             n_range_checkable=len(range_hits),
             pin_range_hit_rate=_mean([1.0 if h else 0.0 for h in range_hits]),
         )
+
+    # -- PandaScore mirror ------------------------------------------------------
+
+    def record_ps_result(self, result: PSResult) -> int:
+        """Upsert one PandaScore match's current state, keyed on
+        ``ps_match_id`` -- unlike ``record_prediction``, this OVERWRITES
+        on a repeat call (see ``PSResult``'s docstring: a refreshable
+        mirror, not an immutable calibration record). Returns the row id
+        (also set on the object).
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO ps_results
+                    (ts_utc, ps_match_id, tournament, team_a, team_b, winner,
+                     score_a, score_b, stage, best_of, status, begin_at, scheduled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (ps_match_id) DO UPDATE SET
+                    ts_utc = excluded.ts_utc, tournament = excluded.tournament,
+                    team_a = excluded.team_a, team_b = excluded.team_b,
+                    winner = excluded.winner, score_a = excluded.score_a,
+                    score_b = excluded.score_b, stage = excluded.stage,
+                    best_of = excluded.best_of, status = excluded.status,
+                    begin_at = excluded.begin_at, scheduled_at = excluded.scheduled_at
+                """,
+                (
+                    result.ts_utc.isoformat(), result.ps_match_id, result.tournament,
+                    result.team_a, result.team_b, result.winner, result.score_a,
+                    result.score_b, result.stage, result.best_of, result.status,
+                    result.begin_at.isoformat() if result.begin_at else None,
+                    result.scheduled_at.isoformat() if result.scheduled_at else None,
+                ),
+            )
+            row = self._conn.execute(
+                "SELECT id FROM ps_results WHERE ps_match_id = ?", (result.ps_match_id,)
+            ).fetchone()
+        result.id = row["id"]
+        return result.id
+
+    def ps_results(self, tournament: Optional[str] = None) -> list[PSResult]:
+        """PandaScore mirror rows, optionally scoped to one tournament,
+        ordered by ``begin_at`` (falling back to ``scheduled_at`` for
+        matches that haven't started) ascending, nulls -- neither known
+        -- last."""
+        query = "SELECT * FROM ps_results"
+        params: list = []
+        if tournament is not None:
+            query += " WHERE tournament = ?"
+            params.append(tournament)
+        query += (
+            " ORDER BY (COALESCE(begin_at, scheduled_at) IS NULL),"
+            " COALESCE(begin_at, scheduled_at) ASC"
+        )
+        return [_row_to_ps_result(row) for row in self._conn.execute(query, params)]
