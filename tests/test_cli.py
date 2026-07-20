@@ -822,3 +822,64 @@ def test_deadlines_command_flags_soon_uncovered_match(tmp_path):
     assert "СКОРО" in result.output
     assert "1 матч" in result.output
     assert "Traceback" not in result.output
+
+
+def test_stageranks_suggest_shows_diff_without_writing(tmp_path):
+    from evhedge.storage import PSResult, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_ps_result(PSResult(
+            ps_match_id=1, tournament="T", team_a="A", team_b="B",
+            stage="Quarterfinal", best_of=3, status="not_started", ts_utc=ts,
+            scheduled_at=ts,
+        ))
+
+    stage_map_path = tmp_path / "stage_map.yaml"
+    stage_map_path.write_text("Quarterfinal: 3\n", encoding="utf-8")
+    ranks_path = tmp_path / "ranks.yaml"
+    ranks_path.write_text('"A": 5\n', encoding="utf-8")
+    original_ranks_text = ranks_path.read_text(encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "stageranks", "suggest", "--db", str(db), "--tournament", "T",
+        "--stage-map", str(stage_map_path), "--ranks", str(ranks_path),
+    ])
+    assert result.exit_code == 0
+    assert "A" in result.output and "B" in result.output
+    assert "Только показ" in result.output
+    # no --apply -> file untouched
+    assert ranks_path.read_text(encoding="utf-8") == original_ranks_text
+    assert "Traceback" not in result.output
+
+
+def test_stageranks_suggest_apply_writes_file(tmp_path):
+    from evhedge.storage import PSResult, Storage
+
+    db = tmp_path / "e.db"
+    ts = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    with Storage(db) as store:
+        store.record_ps_result(PSResult(
+            ps_match_id=1, tournament="T", team_a="A", team_b="B",
+            stage="Quarterfinal", best_of=3, status="not_started", ts_utc=ts,
+            scheduled_at=ts,
+        ))
+
+    stage_map_path = tmp_path / "stage_map.yaml"
+    stage_map_path.write_text("Quarterfinal: 3\n", encoding="utf-8")
+    ranks_path = tmp_path / "ranks.yaml"
+    ranks_path.write_text('"A": 5\n', encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "stageranks", "suggest", "--db", str(db), "--tournament", "T",
+        "--stage-map", str(stage_map_path), "--ranks", str(ranks_path), "--apply",
+    ])
+    assert result.exit_code == 0
+    assert "Записано" in result.output
+
+    from evhedge.auto_predict import load_stage_ranks
+    new_ranks = load_stage_ranks(ranks_path)
+    assert new_ranks == {"A": 3, "B": 3}

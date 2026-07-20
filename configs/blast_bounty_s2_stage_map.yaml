@@ -1,0 +1,24 @@
+# configs/blast_bounty_s2_stage_map.yaml
+# "stage" (подстрока PandaScore tournament.name, регистронезависимо, ->
+# rounds_to_title n) для evhedge stageranks suggest.
+#
+# ПРЕДУПРЕЖДЕНИЕ: BLAST Bounty 2026 Season 2 ещё не заведена в PandaScore
+# на момент подключения (проверено живым запросом 2026-07-20 -- ни серии,
+# ни турнира, ни одного матча под лигой BLAST Premier, league_id=4321).
+# Значения ниже посчитаны из формата турнира (этап 1 Ro32->Ro16, этап 2
+# QF/SF/GF), а СТРОКИ-КЛЮЧИ -- предположение по аналогии с другими BLAST
+# турнирами (см. реальный пример "Group A"/"Playoffs" из BLAST Open Lisbon
+# 2025), а не подтверждённое живым запросом написание именно для S2 2026.
+# Поправить ключи (не логику) как только PandaScore заведёт событие и
+# реальные tournament.name станут известны -- suggest_stage_ranks сопоставляет
+# по подстроке, так что можно держать несколько вариантов написания на
+# одно значение n (см. Quarterfinal/QF ниже).
+
+Ro32: 5
+Ro16: 4
+Quarterfinal: 3
+QF: 3
+Semifinal: 2
+SF: 2
+Grand Final: 1
+Final: 1

@@ -1215,6 +1215,94 @@ def stageranks_init_command(
     console.print(f"Записано {len(teams)} команд -> {out}")
 
 
+@stageranks_group.command("suggest")
+@click.option(
+    "--db", "db_path", type=click.Path(path_type=Path), default=Path("evhedge.db"),
+    show_default=True, help="Snapshot DB to read the PandaScore mirror (ps_results) from.",
+)
+@click.option("--tournament", required=True, help="Tournament to suggest ranks for.")
+@click.option(
+    "--stage-map", "stage_map_path", type=click.Path(path_type=Path), required=True,
+    help="pandascore_sync.load_stage_map YAML ({stage_name_substring: n}).",
+)
+@click.option(
+    "--ranks", "ranks_path", type=click.Path(path_type=Path), required=True,
+    help="Existing stage_ranks YAML to diff against (and, with --apply, overwrite).",
+)
+@click.option("--apply", "do_apply", is_flag=True, default=False, help="Write the diff into --ranks.")
+def stageranks_suggest_command(
+    db_path: Path, tournament: str, stage_map_path: Path, ranks_path: Path, do_apply: bool
+) -> None:
+    """Suggest stage_ranks updates from the PandaScore mirror
+    (``ps_results``, keep it fresh via ``pandascore sync``): shows a
+    diff against --ranks, never writes anything unless --apply is
+    given. Auto-editing without confirmation is deliberately not
+    supported -- predictions are immutable, a stale n is cheap, a wrong
+    one is a permanently lost calibration point (see
+    pandascore_sync.py's module docstring)."""
+    from evhedge.auto_predict import load_stage_ranks
+    from evhedge.pandascore_sync import load_stage_map, suggest_stage_ranks
+
+    try:
+        stage_map = load_stage_map(stage_map_path)
+    except ConfigError as e:
+        error_console.print(f"Ошибка --stage-map: {e}")
+        sys.exit(1)
+
+    current_ranks: dict = {}
+    if ranks_path.exists():
+        try:
+            current_ranks = load_stage_ranks(ranks_path)
+        except ConfigError as e:
+            error_console.print(f"Ошибка --ranks: {e}")
+            sys.exit(1)
+
+    try:
+        with Storage(db_path) as store:
+            diff = suggest_stage_ranks(store, tournament, stage_map, current_ranks)
+    except StorageError as e:
+        error_console.print(f"Ошибка: {e}")
+        sys.exit(1)
+
+    if not diff.added and not diff.changed and not diff.removed:
+        console.print(f"Изменений нет ({diff.unchanged_count} команд без изменений).")
+        return
+
+    table = Table(title=f"stageranks suggest — {tournament}")
+    table.add_column("Команда")
+    table.add_column("Было", justify="right")
+    table.add_column("Станет", justify="right")
+    table.add_column("Действие")
+    for team, n in sorted(diff.added.items()):
+        table.add_row(team, "—", str(n), "добавить")
+    for team, (old, new) in sorted(diff.changed.items()):
+        table.add_row(team, str(old), str(new), "изменить")
+    for team in sorted(diff.removed):
+        table.add_row(team, str(current_ranks[team]), "—", "убрать (выбыла/неизвестна стадия)")
+    console.print(table)
+    console.print(
+        f"добавить: {len(diff.added)}, изменить: {len(diff.changed)}, "
+        f"убрать: {len(diff.removed)}, без изменений: {diff.unchanged_count}"
+    )
+
+    if not do_apply:
+        warn_console.print("Только показ -- добавьте --apply, чтобы записать в --ranks.")
+        return
+
+    new_ranks = dict(current_ranks)
+    new_ranks.update(diff.added)
+    for team, (_, new) in diff.changed.items():
+        new_ranks[team] = new
+    for team in diff.removed:
+        new_ranks.pop(team, None)
+
+    lines = [f"# stage_ranks: {tournament} -- обновлено `evhedge stageranks suggest --apply`\n"]
+    for team, n in sorted(new_ranks.items()):
+        lines.append(f'"{team}": {n}\n')
+    ranks_path.write_text("".join(lines), encoding="utf-8")
+    console.print(f"Записано в {ranks_path} ({len(new_ranks)} команд).")
+
+
 @main.group("aliases")
 def aliases_group() -> None:
     """Team name alias tools: discover discrepancies, sanity-check a

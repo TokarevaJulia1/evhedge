@@ -22,8 +22,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
+from evhedge.config_io import ConfigError, _read_yaml_file
 from evhedge.data_sources import pandascore as pandascore_ds
 from evhedge.data_sources.pandascore import RequestBudget
 from evhedge.storage import PSResult, Storage
@@ -302,3 +304,141 @@ def upcoming_deadlines(
 
     rows.sort(key=lambda r: (r.hours_until is None, r.hours_until))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Tournament structure -> stage_ranks (semi-automatic)
+# ---------------------------------------------------------------------------
+
+def load_stage_map(path: Union[str, Path]) -> dict[str, int]:
+    """Load a ``{stage_name_substring: n}`` YAML map -- PandaScore's own
+    ``tournament.name`` (their "Tournament" = our "stage", see module
+    docstring) matched by case-insensitive SUBSTRING against these keys,
+    longest match wins on a tie (so "Grand Final" beats a looser "Final"
+    entry, if both are present). One config per tournament FORMAT, hand-
+    written -- see ``configs/blast_bounty_s2_stage_map.yaml`` for BLAST
+    Bounty S2's Ro32/Ro16/QF/SF/GF -> 5/4/3/2/1.
+
+    DESIGN CHOICE: substring matching here is NOT the same kind of
+    "fuzzy" matching ``team_aliases`` forbids -- there the risk was
+    silently merging two DIFFERENT real-world entities; here the keys
+    are a small, hand-curated, reviewed vocabulary for ONE tournament's
+    own round names, not a guess at which of many teams a string might
+    mean. A stage name matching nothing is left unmapped (excluded from
+    suggestions), never guessed at.
+
+    Raises:
+        ConfigError: Malformed YAML, or a non-positive-int value.
+    """
+    path = Path(path)
+    data = _read_yaml_file(path)
+    result: dict[str, int] = {}
+    for stage, n in data.items():
+        try:
+            n_int = int(n)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{path}: stage_map[{stage!r}] must be an int, got {n!r}") from None
+        if n_int <= 0:
+            raise ConfigError(f"{path}: stage_map[{stage!r}] must be a positive int, got {n_int}")
+        result[str(stage)] = n_int
+    return result
+
+
+def _match_stage(stage_name: str, stage_map: dict[str, int]) -> Optional[int]:
+    """Longest case-insensitive substring match of ``stage_name`` against
+    ``stage_map``'s keys, or ``None`` if nothing matches."""
+    lowered = stage_name.lower()
+    best_key: Optional[str] = None
+    for key in stage_map:
+        if key.lower() in lowered and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    return stage_map[best_key] if best_key is not None else None
+
+
+def compute_stage_ranks(
+    store: Storage, tournament: str, stage_map: dict[str, int]
+) -> dict[str, int]:
+    """Derive current ``{team: rounds_to_title}`` from ``ps_results``:
+    for each team, look at their MOST RECENT match (by begin_at/
+    scheduled_at) whose stage matches ``stage_map``:
+
+    - Match not yet finished -> team is AT that stage, n = the mapped
+      value directly.
+    - Match finished, team WON -> team has ADVANCED past that stage;
+      n = mapped_value - 1 (one fewer win needed), computed arithmetically
+      so a team that just won doesn't need PandaScore to have created
+      the NEXT stage's matches yet. n reaching 0 means champion --
+      excluded (no more stages to bet on).
+    - Match finished, team LOST -> eliminated, excluded entirely
+      (absence in the map is what makes auto_predict degrade to
+      p_model=None honestly -- see auto_predict.py's module docstring).
+
+    Teams whose only matches have an unmapped stage name are excluded,
+    not guessed at.
+    """
+    rows = store.ps_results(tournament=tournament)
+
+    # team -> (reference_time, mapped_n, finished, won) for the LATEST
+    # mapped-stage match seen so far
+    latest: dict[str, tuple[datetime, int, bool, bool]] = {}
+
+    for row in rows:
+        n = _match_stage(row.stage, stage_map)
+        if n is None:
+            continue
+        reference_time = row.begin_at or row.scheduled_at or row.ts_utc
+        for team in (row.team_a, row.team_b):
+            prev = latest.get(team)
+            if prev is not None and prev[0] >= reference_time:
+                continue
+            finished = row.status == "finished"
+            won = finished and row.winner == team
+            latest[team] = (reference_time, n, finished, won)
+
+    result: dict[str, int] = {}
+    for team, (_, n, finished, won) in latest.items():
+        if finished and not won:
+            continue  # eliminated
+        suggested_n = (n - 1) if (finished and won) else n
+        if suggested_n <= 0:
+            continue  # champion -- no further stage to bet on
+        result[team] = suggested_n
+
+    return result
+
+
+@dataclass
+class StageRanksDiff:
+    """What ``suggest_stage_ranks`` found vs the currently-loaded file."""
+
+    added: dict[str, int] = field(default_factory=dict)      # new team -> n
+    changed: dict[str, tuple[int, int]] = field(default_factory=dict)  # team -> (old, new)
+    removed: list[str] = field(default_factory=list)         # team no longer live/mapped
+    unchanged_count: int = 0
+
+
+def suggest_stage_ranks(
+    store: Storage, tournament: str, stage_map: dict[str, int], current_ranks: dict[str, int]
+) -> StageRanksDiff:
+    """Diff ``compute_stage_ranks``'s fresh suggestion against
+    ``current_ranks`` (the already-loaded stage_ranks file) -- never
+    applies anything itself (see ``evhedge stageranks suggest``'s
+    ``--apply`` flag: auto-editing without confirmation is explicitly
+    forbidden, predictions are immutable and a stale n is cheaper than a
+    wrong one)."""
+    suggested = compute_stage_ranks(store, tournament, stage_map)
+    diff = StageRanksDiff()
+
+    for team, n in suggested.items():
+        if team not in current_ranks:
+            diff.added[team] = n
+        elif current_ranks[team] != n:
+            diff.changed[team] = (current_ranks[team], n)
+        else:
+            diff.unchanged_count += 1
+
+    for team in current_ranks:
+        if team not in suggested:
+            diff.removed.append(team)
+
+    return diff
