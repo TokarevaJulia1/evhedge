@@ -15,6 +15,7 @@ from evhedge.pandascore_sync import (
     RECONCILE_LAG_HOURS,
     _match_stage,
     compute_stage_ranks,
+    find_tournament_id_for_matchup,
     load_stage_map,
     match_to_ps_result,
     reconcile,
@@ -348,3 +349,56 @@ def test_suggest_stage_ranks_diff_added_changed_removed(tmp_path):
         assert diff.added == {"B": 3, "D": 2}
         assert "Ghost" in diff.removed
         assert diff.unchanged_count == 1  # C stayed at 2
+
+
+# --- find_tournament_id_for_matchup -------------------------------------------------
+# Real behavior confirmed live 2026-07-21: PandaScore's own team search is
+# one-directional ("does THEIR name contain my query"), so searching "Team
+# Spirit" against an entry literally named "Spirit" returns nothing -- hence
+# the "Team " prefix-stripping fallback search term exercised below.
+
+def test_find_tournament_id_for_matchup_confirms_real_match(monkeypatch):
+    def fake_fetch_teams(search_term, budget):
+        if search_term in ("Spirit", "Team Spirit"):
+            return [{"id": 124523, "name": "Spirit", "acronym": "TS"}]
+        return []
+
+    def fake_fetch_matches(status, budget, opponent_id=None, max_pages=None):
+        if opponent_id == 124523 and status == "upcoming":
+            return [REAL_MATCH_SPIRIT_IMPERIAL]
+        return []
+
+    monkeypatch.setattr("evhedge.pandascore_sync.pandascore_ds.fetch_teams", fake_fetch_teams)
+    monkeypatch.setattr("evhedge.pandascore_sync.pandascore_ds.fetch_matches", fake_fetch_matches)
+
+    tid = find_tournament_id_for_matchup("Team Spirit", "Imperial")
+    assert tid == 16106  # REAL_MATCH_SPIRIT_IMPERIAL's tournament id
+
+
+def test_find_tournament_id_for_matchup_no_match_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.pandascore_sync.pandascore_ds.fetch_teams", lambda search_term, budget: []
+    )
+    monkeypatch.setattr(
+        "evhedge.pandascore_sync.pandascore_ds.fetch_matches",
+        lambda status, budget, opponent_id=None, max_pages=None: [],
+    )
+
+    assert find_tournament_id_for_matchup("Nobody", "Nothing") is None
+
+
+def test_find_tournament_id_for_matchup_rejects_wrong_opponent(monkeypatch):
+    """A candidate team's upcoming match against a THIRD team must not be
+    mistaken for the requested matchup."""
+    def fake_fetch_teams(search_term, budget):
+        return [{"id": 124523, "name": "Spirit", "acronym": "TS"}]
+
+    def fake_fetch_matches(status, budget, opponent_id=None, max_pages=None):
+        if opponent_id == 124523 and status == "upcoming":
+            return [REAL_MATCH_SPIRIT_IMPERIAL]  # Spirit vs Imperial, not vs OG
+        return []
+
+    monkeypatch.setattr("evhedge.pandascore_sync.pandascore_ds.fetch_teams", fake_fetch_teams)
+    monkeypatch.setattr("evhedge.pandascore_sync.pandascore_ds.fetch_matches", fake_fetch_matches)
+
+    assert find_tournament_id_for_matchup("Spirit", "OG") is None

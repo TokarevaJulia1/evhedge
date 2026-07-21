@@ -455,6 +455,9 @@
     if (rows.length > 0) {
       rows[0].asset = p.asset || null;
       rows[0].liveNote = null;
+      if (p.oppositeOutcome) {
+        rows[0].matchLabel = `${p.outcome} vs ${p.oppositeOutcome}`;
+      }
 
       if (p.redeemable) {
         // Рынок реально резолвнулся -- коэффициент считаем из ФАКТИЧЕСКОГО
@@ -478,6 +481,30 @@
       ? `фактический результат: ${(rows[0].coefficient * 100).toFixed(1)}%`
       : "рынок ещё не резолвнулся, коэффициент введите вручную после исхода";
     connStatus.textContent = `Загружено: "${p.title}" (${p.outcome}) → строка 1 привязана к живому ордербоку, ${outcomeNote}.`;
+
+    if (p.outcome && p.oppositeOutcome) {
+      lookupPandaScoreTournament(p.outcome, p.oppositeOutcome);
+    }
+  }
+
+  async function lookupPandaScoreTournament(teamA, teamB) {
+    bracketStatus.classList.remove("err");
+    bracketStatus.textContent = "Ищу турнир на PandaScore по загруженной позиции...";
+    try {
+      const url = `/api/pandascore-match?team_a=${encodeURIComponent(teamA)}&team_b=${encodeURIComponent(teamB)}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "ошибка поиска турнира");
+      if (data.tournament_id) {
+        bracketTournamentIdEl.value = String(data.tournament_id);
+        await fetchBracket();
+      } else {
+        bracketStatus.textContent = "Не удалось найти турнир на PandaScore по этой позиции — укажите Tournament ID вручную.";
+      }
+    } catch (err) {
+      bracketStatus.classList.add("err");
+      bracketStatus.textContent = "Ошибка поиска турнира: " + err.message;
+    }
   }
 
   async function fetchLiveBook(rowId) {

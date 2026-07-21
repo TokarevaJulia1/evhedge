@@ -43,7 +43,7 @@ STATIC_DIR = Path(__file__).parent / "webapp_static"
 #: API's full response (see ``polymarket.fetch_positions``) so the
 #: browser never depends on fields that might change/disappear upstream.
 _POSITION_FIELDS = (
-    "title", "outcome", "eventSlug", "slug", "size", "avgPrice",
+    "title", "outcome", "oppositeOutcome", "eventSlug", "slug", "size", "avgPrice",
     "initialValue", "currentValue", "curPrice", "asset", "redeemable",
 )
 
@@ -94,6 +94,18 @@ def bracket_payload(tournament_id: int) -> list[dict]:
             "tbd": tbd,
         })
     return out
+
+
+def pandascore_match_payload(team_a: str, team_b: str) -> dict:
+    """``{tournament_id: N}`` (or ``{tournament_id: None}`` if not
+    confirmed) for the real PandaScore match between two teams --
+    thin wrapper over ``pandascore_sync.find_tournament_id_for_matchup``
+    so the dashboard can auto-fill the bracket panel from a loaded
+    Polymarket leg position instead of the user hand-typing an id."""
+    from evhedge.pandascore_sync import find_tournament_id_for_matchup
+
+    tournament_id = find_tournament_id_for_matchup(team_a, team_b)
+    return {"tournament_id": tournament_id}
 
 
 _CONTENT_TYPES = {
@@ -158,6 +170,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "укажите ?tournament_id=<число>"})
                     return
                 self._send_json(200, bracket_payload(int(tournament_id)))
+                return
+            if parsed.path == "/api/pandascore-match":
+                team_a = (qs.get("team_a") or [None])[0]
+                team_b = (qs.get("team_b") or [None])[0]
+                if not team_a or not team_b:
+                    self._send_json(400, {"error": "укажите ?team_a=...&team_b=..."})
+                    return
+                self._send_json(200, pandascore_match_payload(team_a, team_b))
                 return
             self._send_static(parsed.path)
         except PolymarketAPIError as e:

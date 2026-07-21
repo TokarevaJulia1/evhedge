@@ -442,3 +442,79 @@ def suggest_stage_ranks(
             diff.removed.append(team)
 
     return diff
+
+
+# ---------------------------------------------------------------------------
+# Matching a live Polymarket leg back to a PandaScore Tournament id
+# ---------------------------------------------------------------------------
+
+def find_tournament_id_for_matchup(
+    team_a_raw: str, team_b_raw: str, budget: Optional[RequestBudget] = None,
+) -> Optional[int]:
+    """Given two team names as they came off a Polymarket leg position
+    (``outcome``/``oppositeOutcome`` -- Polymarket's own spelling, not
+    necessarily PandaScore's), find the PandaScore Tournament id of the
+    real match between them -- so the dashboard can show the whole known
+    bracket for a loaded position without the user hand-typing a
+    tournament id.
+
+    Structural verification, not a name-similarity guess (same
+    discipline as ``team_aliases``): searches PandaScore's team registry
+    for candidates matching either spelling of team_a, then for EACH
+    candidate (there can be several same-ish-named orgs -- see
+    ``data_sources.pandascore.fetch_teams``'s Falcons/Aurora example)
+    checks that team's own matches for one whose OTHER opponent
+    canonicalizes to team_b. Only a confirmed, real scheduled match
+    counts.
+
+    Returns:
+        The PandaScore Tournament id of the confirmed match, or
+        ``None`` if nothing could be confirmed (team not found, no
+        match between exactly these two teams yet, ...) -- never a
+        best-effort guess.
+    """
+    budget = budget or RequestBudget()
+    alias_map = load_default_aliases()
+    team_a = canonical_name(team_a_raw, alias_map)
+    team_b = canonical_name(team_b_raw, alias_map)
+
+    # PandaScore's own search matches "does THEIR name contain my query",
+    # not the other way round -- confirmed live: search[name]="Team
+    # Spirit" returns nothing even though PandaScore's own entry (id
+    # 124523) is named exactly "Spirit". Try, in order: the raw name as
+    # given, its canonical form, and (cheap, safe heuristic -- the actual
+    # match is still verified structurally below, this only widens the
+    # SEARCH candidates) the raw name with a leading "Team " stripped.
+    search_terms = [team_a_raw, team_a]
+    if team_a_raw.startswith("Team "):
+        search_terms.append(team_a_raw[len("Team "):])
+
+    candidates: list[dict] = []
+    seen_ids: set = set()
+    for search_term in search_terms:
+        for c in pandascore_ds.fetch_teams(search_term, budget):
+            if c.get("id") not in seen_ids:
+                seen_ids.add(c.get("id"))
+                candidates.append(c)
+
+    for candidate in candidates:
+        team_id = candidate.get("id")
+        if team_id is None:
+            continue
+        for status in ("upcoming", "running", "past"):
+            matches = pandascore_ds.fetch_matches(
+                status, budget, opponent_id=team_id, max_pages=1,
+            )
+            for m in matches:
+                opponents = m.get("opponents") or []
+                if len(opponents) != 2:
+                    continue
+                names = {
+                    canonical_name(o.get("opponent", {}).get("name", ""), alias_map)
+                    for o in opponents
+                }
+                if names == {team_a, team_b}:
+                    tid = (m.get("tournament") or {}).get("id")
+                    if tid is not None:
+                        return tid
+    return None

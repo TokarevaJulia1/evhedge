@@ -158,6 +158,19 @@ def test_fetch_matches_builds_league_filter(monkeypatch):
     assert captured["params"]["filter[league_id]"] == 5370
 
 
+def test_fetch_matches_builds_opponent_id_filter(monkeypatch):
+    captured = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["params"] = params
+        return FakeResponse([{"id": 1}], 200, {"X-Rate-Limit-Remaining": "900"})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    fetch_matches("upcoming", RequestBudget(), opponent_id=3455, max_pages=1)
+
+    assert captured["params"]["filter[opponent_id]"] == 3455
+
+
 def test_fetch_series_builds_name_search(monkeypatch):
     captured = {}
 

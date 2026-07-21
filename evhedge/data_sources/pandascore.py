@@ -210,11 +210,16 @@ def fetch_matches(
     league_id: Optional[int] = None,
     serie_id: Optional[int] = None,
     tournament_id: Optional[int] = None,
+    opponent_id: Optional[int] = None,
     per_page: int = 50,
     max_pages: Optional[int] = None,
 ) -> list[dict]:
     """``GET /csgo/matches/{status}`` -- filtered by whichever of
-    league/serie/tournament id is given (PandaScore's own filter params).
+    league/serie/tournament/opponent id is given (PandaScore's own
+    filter params; ``opponent_id`` confirmed live -- used to look up a
+    specific team's own matches directly, e.g. to disambiguate same-
+    named teams by their real match history, or to find which
+    tournament a live Polymarket matchup belongs to).
 
     Args:
         status: One of "upcoming", "past", "running".
@@ -245,6 +250,8 @@ def fetch_matches(
         params["filter[serie_id]"] = serie_id
     if tournament_id is not None:
         params["filter[tournament_id]"] = tournament_id
+    if opponent_id is not None:
+        params["filter[opponent_id]"] = opponent_id
 
     return _get_list(f"{BASE_URL}/{GAME_PATH}/matches/{status}", params, budget, max_pages)
 

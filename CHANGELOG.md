@@ -7,6 +7,29 @@
 ## [Unreleased]
 
 ### Добавлено
+- `evhedge webapp` — авто-заполнение PandaScore Tournament ID из загруженной
+  позиции Polymarket (вместо ручного ввода id).
+  - `data_sources.pandascore.fetch_matches(..., opponent_id=...)`:
+    фильтр `filter[opponent_id]` — находим ближайшие матчи конкретной
+    команды, не листая все турниры подряд.
+  - `pandascore_sync.find_tournament_id_for_matchup(team_a, team_b)`:
+    ищет команду по имени (через `fetch_teams`), затем среди её
+    upcoming/running/past матчей ищет ТОЧНО игру против второй команды —
+    структурная проверка (реальный подтверждённый матч именно этих двух
+    команд), а не угадывание по похожести имён — тот же принцип, что и
+    в `team_aliases` (без fuzzy-matching). Настоящая находка: поиск
+    PandaScore однонаправленный ("содержит ли ИХ имя мой запрос") —
+    `search[name]="Team Spirit"` не находит запись, названную буквально
+    "Spirit"; добавлен fallback без префикса "Team ". Проверено живым
+    вызовом на реальном турнире BLAST Bounty Qualifier: `Spirit`/`OG` и
+    `Sharks`/`FURIA` оба корректно резолвятся в id `21474`.
+  - `webapp.pandascore_match_payload` / `/api/pandascore-match?team_a=&team_b=`
+    — тонкая обёртка для дашборда; `oppositeOutcome` добавлен в
+    `_POSITION_FIELDS`, чтобы фронтенд знал вторую команду позиции.
+  - `loadPositionIntoChain` в `index.html`: при загрузке позиции с двумя
+    известными сторонами сам стучится в `/api/pandascore-match`, находит
+    id и сразу подгружает панель сетки — Tournament ID руками вводить
+    больше не нужно (если матч на PandaScore подтверждён).
 - `evhedge webapp` — панель «Потенциальные ноги турнира» на PandaScore.
   - `data_sources.pandascore.fetch_tournament_brackets(tournament_id)`:
     `GET /tournaments/{id}/brackets` — весь известный bracket ОДНИМ

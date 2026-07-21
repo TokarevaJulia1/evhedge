@@ -31,7 +31,7 @@ def test_positions_payload_trims_to_known_fields(monkeypatch):
 
     payload = positions_payload("0xabc")
     assert payload == [{
-        "title": "T", "outcome": "Yes", "eventSlug": "e", "slug": "s",
+        "title": "T", "outcome": "Yes", "oppositeOutcome": None, "eventSlug": "e", "slug": "s",
         "size": 10.0, "avgPrice": 0.5, "initialValue": 5.0, "currentValue": 6.0,
         "curPrice": 0.6, "asset": "tok1", "redeemable": False,
     }]
@@ -108,7 +108,7 @@ def test_server_positions_endpoint_returns_data(running_server, monkeypatch):
     )
     status, body = _get_json(running_server + "/api/positions?address=0xabc")
     assert status == 200
-    assert body == [{"title": "T", "outcome": "Yes", "eventSlug": "e", "slug": "s",
+    assert body == [{"title": "T", "outcome": "Yes", "oppositeOutcome": None, "eventSlug": "e", "slug": "s",
                       "size": 1.0, "avgPrice": 0.5, "initialValue": 0.5, "currentValue": 0.5,
                       "curPrice": 0.5, "asset": "tok1", "redeemable": False}]
 
@@ -212,3 +212,45 @@ def test_server_bracket_endpoint_maps_pandascore_error_to_502(running_server, mo
     status, body = _get_json(running_server + "/api/bracket?tournament_id=21474")
     assert status == 502
     assert body["error"] == "boom"
+
+
+# --- pandascore_match_payload / /api/pandascore-match ------------------------------
+# Auto-fills the dashboard's Tournament ID field from a loaded Polymarket
+# leg position's two team names instead of the user typing it in by hand.
+
+def test_pandascore_match_payload_returns_confirmed_tournament_id(monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.pandascore_sync.find_tournament_id_for_matchup",
+        lambda team_a, team_b: 21474,
+    )
+    from evhedge.webapp import pandascore_match_payload
+
+    assert pandascore_match_payload("Spirit", "OG") == {"tournament_id": 21474}
+
+
+def test_pandascore_match_payload_none_when_unconfirmed(monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.pandascore_sync.find_tournament_id_for_matchup",
+        lambda team_a, team_b: None,
+    )
+    from evhedge.webapp import pandascore_match_payload
+
+    assert pandascore_match_payload("Nobody", "Nothing") == {"tournament_id": None}
+
+
+def test_server_pandascore_match_endpoint_requires_both_teams(running_server):
+    status, body = _get_json(running_server + "/api/pandascore-match?team_a=Spirit")
+    assert status == 400
+    assert "team_a" in body["error"]
+
+
+def test_server_pandascore_match_endpoint_returns_data(running_server, monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.pandascore_sync.find_tournament_id_for_matchup",
+        lambda team_a, team_b: 21474,
+    )
+    status, body = _get_json(
+        running_server + "/api/pandascore-match?team_a=Spirit&team_b=OG"
+    )
+    assert status == 200
+    assert body == {"tournament_id": 21474}
