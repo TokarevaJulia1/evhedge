@@ -4,15 +4,37 @@ rem BLAST Bounty 2026 Season 2 (CS2): pre-match odds watcher.
 rem
 rem Every 15 minutes pulls into data\blast2026.db:
 rem   - the winner outright board (32 teams, YES/NO),
-rem   - Match Winner leg prices for every BLAST Bounty match (once Gamma
-rem     lists them -- as of 2026-07-16 no match events exist yet under the
-rem     "cs2" tag; the tournament's first Ro32 match (FURIA-Sharks) is
-rem     2026-07-24. Same mechanism as EWC, nothing to change once they
-rem     appear -- title_filter is deliberately "Bounty 2026 Season 2"
-rem     (no leading Blast/BLAST) since Gamma's own event titles for this
-rem     tournament are inconsistently cased ("BLAST Bounty..." on the
-rem     winner event, "Blast Bounty..." on every prop event seen so far).
-rem   - resolves for finished maps/series,
+rem   - Match Winner leg prices for every BLAST Bounty match. CORRECTED
+rem     2026-07-24 against the real live matches (as of 2026-07-16 these
+rem     didn't exist yet, so this was guessed and wrong on both counts):
+rem       - tag is "counter-strike-2", NOT "cs2" -- confirmed live via a
+rem         real match event's own tags ([esports, counter-strike-2,
+rem         games, sports]); "cs2" silently returned 0 match events the
+rem         whole time, never errored.
+rem       - title_filter is "BLAST Bounty" (all-caps BLAST, no "2026
+rem         Season 2", no "Qualifier"), NOT "Bounty 2026 Season 2" --
+rem         real match titles read like "Counter-Strike: Sharks vs FURIA
+rem         (BO3) - BLAST Bounty Qualifier", which never contained the
+rem         old filter string. "BLAST Bounty" (exact case) is chosen
+rem         deliberately: it does NOT match the prop-bet events (those
+rem         are titled "Blast Bounty 2026 Season 2: ..." -- lowercase
+rem         "last", different from match titles' all-caps "BLAST") --
+rem         confirmed no false-positive overlap. NOTE: this stage's
+rem         matches are labeled "Qualifier"; if stage-2 (QF/SF/GF) later
+rem         turns out to use a differently-worded title, this filter may
+rem         need ANOTHER correction on contact with THAT live branch --
+rem         same discipline as everywhere else in this project.
+rem       - --matches-since is ALSO corrected: 2026-07-15, not 2026-07-20.
+rem         Gotcha confirmed live: this param filters on the Gamma EVENT's
+rem         own creation/listing date, NOT the real match's startTime --
+rem         these match events were all created 2026-07-17 even though
+rem         their matches run 2026-07-21 through 07-24, so the old
+rem         2026-07-20 cutoff silently excluded every one of them (0
+rem         markets seen, no error -- easy to miss).
+rem   - resolves for finished maps/series (per-map resolves for CS2 now
+rem     work too -- collect.py previously only recognized Dota's "Game N
+rem     Winner" market naming; CS2 uses "Map N Winner", fixed in the
+rem     same commit as this file),
 rem   - auto-recorded predictions the first time each leg's book clears
 rem     the quality trigger (see evhedge/auto_predict.py), model half fed
 rem     by --stage-ranks (all 32 teams start at n=5 -- see the file's own
@@ -60,7 +82,7 @@ echo.
 echo [%date% %time%] evhedge pull...
 python -m evhedge.cli pull --tournament "BLAST Bounty 2026 Season 2" ^
   --board "blast-bounty-2026-season-2-winner-20260709030103861:winner" ^
-  --matches "cs2:Bounty 2026 Season 2" --matches-since 2026-07-20 ^
+  --matches "counter-strike-2:BLAST Bounty" --matches-since 2026-07-15 ^
   --db data\blast2026.db ^
   --stage-ranks configs\blast_bounty_s2_stage_ranks.yaml
 if errorlevel 1 echo [%date% %time%] pull failed (network?) -- retrying in 15 min.

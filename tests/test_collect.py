@@ -8,6 +8,7 @@ import pytest
 
 from evhedge.collect import (
     CollectError,
+    _is_result_market,
     collect_board,
     collect_match_markets,
 )
@@ -545,3 +546,18 @@ def test_blast_pull_does_not_write_into_ewc_db(tmp_path, monkeypatch):
         assert store.snapshots("BLAST Bounty 2026 Season 2") == []
     with Storage(blast_db) as store:
         assert len(store.snapshots("BLAST Bounty 2026 Season 2")) == 2
+
+
+# --- _is_result_market: per-game-unit terminology differs by game ------------------
+
+def test_is_result_market_recognizes_dota_game_and_cs2_map_naming():
+    """Real regression: BLAST Bounty (CS2) per-map result markets read
+    "Map 1 Winner" -- collect.py originally only recognized Dota's "Game
+    N Winner" naming, so CS2 per-map resolves were silently never
+    collected (confirmed live 2026-07-24 against the real FURIA-Sharks
+    event: groupItemTitle "Map 1 Winner" / "Map 2 Winner" / "Match Winner")."""
+    assert _is_result_market({"groupItemTitle": "Match Winner"}) is True
+    assert _is_result_market({"groupItemTitle": "Game 1 Winner"}) is True   # Dota
+    assert _is_result_market({"groupItemTitle": "Map 1 Winner"}) is True   # CS2
+    assert _is_result_market({"groupItemTitle": "Map 2 Winner"}) is True   # CS2
+    assert _is_result_market({"groupItemTitle": "Ends in Daytime"}) is False

@@ -51,8 +51,14 @@ logger = logging.getLogger(__name__)
 #: result we archive. DESIGN CHOICE: series + per-game winners only;
 #: props (First Blood, Roshan, kill totals, ...) are deliberately not
 #: collected -- they're not on any current path to a hedge leg.
+#: Per-game-unit prefix is GAME-SPECIFIC, not one universal word: Dota 2
+#: markets read "Game 1 Winner" (confirmed live, EWC 2026), CS2 markets
+#: read "Map 1 Winner" (confirmed live, BLAST Bounty Qualifier
+#: 2026-07-24) -- both must be recognized, or the non-Dota game's per-map
+#: resolves silently never get collected (only "Match Winner" would
+#: still match, since that title is identical across games).
 RESULT_MARKET_TITLES = ("Match Winner",)
-RESULT_MARKET_PREFIX = "Game "
+RESULT_MARKET_PREFIXES = ("Game ", "Map ")
 RESULT_MARKET_SUFFIX = " Winner"
 
 
@@ -239,7 +245,7 @@ def collect_board(
 def _is_result_market(market: dict) -> bool:
     title = market.get("groupItemTitle") or ""
     return title in RESULT_MARKET_TITLES or (
-        title.startswith(RESULT_MARKET_PREFIX) and title.endswith(RESULT_MARKET_SUFFIX)
+        title.startswith(RESULT_MARKET_PREFIXES) and title.endswith(RESULT_MARKET_SUFFIX)
     )
 
 
