@@ -15,7 +15,7 @@ from evhedge.data_sources.polymarket import (
     OrderBook,
     PolymarketAPIError,
 )
-from evhedge.webapp import DashboardHandler, book_payload, positions_payload
+from evhedge.webapp import DashboardHandler, book_payload, bracket_payload, positions_payload
 from http.server import ThreadingHTTPServer
 
 
@@ -145,3 +145,70 @@ def test_server_unknown_route_404s(running_server):
 def test_server_path_traversal_is_rejected(running_server):
     status, body = _get_json(running_server + "/../../etc/passwd")
     assert status == 404
+
+
+# --- bracket_payload / /api/bracket ---------------------------------------------------
+
+_REAL_BRACKET_FIXTURE = [
+    {
+        "id": 1, "name": "Round of 32 match 2: TS vs OG", "status": "not_started",
+        "scheduled_at": "2026-07-23T15:00:00Z", "number_of_games": 3,
+        "opponents": [
+            {"opponent": {"id": 1, "name": "Spirit"}},   # PandaScore's short spelling
+            {"opponent": {"id": 2, "name": "OG"}},
+        ],
+    },
+    {
+        "id": 2, "name": "Round of 16 match 1: TBD vs TBD", "status": "not_started",
+        "scheduled_at": "2026-07-26T10:00:00Z", "number_of_games": 3,
+        "opponents": [],
+    },
+]
+
+
+def test_bracket_payload_canonicalizes_and_flags_tbd(monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.webapp.pandascore_ds.fetch_tournament_brackets",
+        lambda tid, budget: _REAL_BRACKET_FIXTURE,
+    )
+    rows = bracket_payload(21474)
+    assert rows[0]["team_a"] == "Team Spirit"  # canonicalized, same alias map as collect.py
+    assert rows[0]["team_b"] == "OG"
+    assert rows[0]["tbd"] is False
+    assert rows[1]["team_a"] == "TBD" and rows[1]["team_b"] == "TBD"
+    assert rows[1]["tbd"] is True
+    assert rows[1]["scheduled_at"] == "2026-07-26T10:00:00Z"
+
+
+def test_server_bracket_endpoint_requires_tournament_id(running_server):
+    status, body = _get_json(running_server + "/api/bracket")
+    assert status == 400
+    assert "tournament_id" in body["error"]
+
+
+def test_server_bracket_endpoint_rejects_non_numeric_id(running_server):
+    status, body = _get_json(running_server + "/api/bracket?tournament_id=abc")
+    assert status == 400
+
+
+def test_server_bracket_endpoint_returns_data(running_server, monkeypatch):
+    monkeypatch.setattr(
+        "evhedge.webapp.pandascore_ds.fetch_tournament_brackets",
+        lambda tid, budget: _REAL_BRACKET_FIXTURE,
+    )
+    status, body = _get_json(running_server + "/api/bracket?tournament_id=21474")
+    assert status == 200
+    assert len(body) == 2
+    assert body[0]["team_a"] == "Team Spirit"
+
+
+def test_server_bracket_endpoint_maps_pandascore_error_to_502(running_server, monkeypatch):
+    from evhedge.data_sources.pandascore import PandaScoreError
+
+    def boom(tid, budget):
+        raise PandaScoreError("boom")
+
+    monkeypatch.setattr("evhedge.webapp.pandascore_ds.fetch_tournament_brackets", boom)
+    status, body = _get_json(running_server + "/api/bracket?tournament_id=21474")
+    assert status == 502
+    assert body["error"] == "boom"

@@ -107,6 +107,7 @@
   }
   td.idx { color: var(--muted); width: 26px; }
   td.coef-cell input { max-width: 110px; }
+  td.match-cell input { max-width: 220px; text-align: left; font-family: var(--font-ui); }
   td.status-cell select { max-width: 148px; }
   .amount { font-weight: 600; }
   .amount.profit { color: var(--profit); }
@@ -161,6 +162,20 @@
     <div class="positions-list" id="positionsList"></div>
   </section>
 
+  <!-- Потенциальные ноги турнира (PandaScore) -->
+  <section class="card">
+    <div class="eyebrow">Потенциальные ноги турнира (PandaScore)</div>
+    <div class="connect-row">
+      <div class="addr-field">
+        <label class="field-label" for="bracketTournamentId">PandaScore Tournament ID</label>
+        <input id="bracketTournamentId" type="text" placeholder="напр. 21474" />
+      </div>
+      <button class="btn-accent" id="fetchBracketBtn">Загрузить сетку</button>
+    </div>
+    <div class="conn-status" id="bracketStatus"></div>
+    <div class="positions-list" id="bracketList"></div>
+  </section>
+
   <!-- Базовые параметры -->
   <section class="card">
     <div class="eyebrow">Базовые параметры</div>
@@ -186,6 +201,7 @@
         <thead>
           <tr>
             <th>№</th>
+            <th>Матч</th>
             <th>Коэффициент доходности</th>
             <th>Сумма сделки ($)</th>
             <th>Чистый доход ($)</th>
@@ -217,10 +233,17 @@
   // (asset = CLOB token id) -- только для строки, реально загруженной
   // из открытой позиции; гипотетические будущие этапы её не имеют.
   let rows = [
-    { id: 1, coefficient: 0.85, status: STATUS.COMPLETED, asset: null, liveNote: null },
-    { id: 2, coefficient: 0.6, status: STATUS.PENDING, asset: null, liveNote: null },
+    { id: 1, coefficient: 0.85, status: STATUS.COMPLETED, asset: null, liveNote: null, matchLabel: "" },
+    { id: 2, coefficient: 0.6, status: STATUS.PENDING, asset: null, liveNote: null, matchLabel: "" },
   ];
   let nextId = 3;
+
+  function escapeAttr(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
 
   const moneyFmt = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   function formatMoney(value, withSign) {
@@ -268,7 +291,7 @@
 
     rowsBody.innerHTML = "";
     if (computed.length === 0) {
-      rowsBody.innerHTML = '<tr class="empty-row"><td colspan="8">Цепочка пуста — добавьте первый этап.</td></tr>';
+      rowsBody.innerHTML = '<tr class="empty-row"><td colspan="9">Цепочка пуста — добавьте первый этап.</td></tr>';
     }
 
     computed.forEach((row, idx) => {
@@ -291,6 +314,9 @@
 
       tr.innerHTML = `
         <td class="idx">${idx + 1}</td>
+        <td class="match-cell">
+          <input type="text" data-id="${row.id}" data-field="matchLabel" value="${escapeAttr(row.matchLabel || "")}" ${row.reachable ? "" : "disabled"} placeholder="команда А vs команда Б" />
+        </td>
         <td class="coef-cell">
           <input type="number" step="0.01" data-id="${row.id}" data-field="coefficient" value="${row.coefficient}" ${row.reachable ? "" : "disabled"} placeholder="0.85" />
         </td>
@@ -349,7 +375,7 @@
   }
 
   $("addRowBtn").addEventListener("click", () => {
-    rows.push({ id: nextId++, coefficient: 0, status: STATUS.PENDING, asset: null, liveNote: null });
+    rows.push({ id: nextId++, coefficient: 0, status: STATUS.PENDING, asset: null, liveNote: null, matchLabel: "" });
     render();
   });
 
@@ -472,8 +498,92 @@
 
   fetchBtn.addEventListener("click", fetchPositions);
 
+  // ---------- PandaScore: сетка турнира (все потенциальные ноги) ----------
+
+  const bracketStatus = $("bracketStatus");
+  const bracketList = $("bracketList");
+  const bracketTournamentIdEl = $("bracketTournamentId");
+  const fetchBracketBtn = $("fetchBracketBtn");
+
+  const savedTournamentId = localStorage.getItem("evhedge_tournament_id");
+  if (savedTournamentId) bracketTournamentIdEl.value = savedTournamentId;
+
+  function fmtScheduled(iso) {
+    if (!iso) return "время неизвестно";
+    const d = new Date(iso);
+    return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  async function fetchBracket() {
+    const tournamentId = bracketTournamentIdEl.value.trim();
+    if (!tournamentId) {
+      bracketStatus.textContent = "Введите PandaScore Tournament ID";
+      bracketStatus.classList.add("err");
+      return;
+    }
+    localStorage.setItem("evhedge_tournament_id", tournamentId);
+    bracketStatus.classList.remove("err");
+    bracketStatus.textContent = "Загрузка...";
+    fetchBracketBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/bracket?tournament_id=${encodeURIComponent(tournamentId)}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "неизвестная ошибка");
+      renderBracket(data);
+      const known = data.filter((m) => !m.tbd).length;
+      bracketStatus.textContent = `Всего ног в сетке: ${data.length} (известных пар: ${known}, ещё TBD: ${data.length - known})`;
+    } catch (err) {
+      bracketStatus.classList.add("err");
+      bracketStatus.textContent = "Ошибка: " + err.message;
+      bracketList.innerHTML = "";
+    } finally {
+      fetchBracketBtn.disabled = false;
+    }
+  }
+
+  function renderBracket(matches) {
+    // Сначала известные пары, потом TBD-слоты; внутри группы -- по времени старта.
+    const sorted = [...matches].sort((a, b) => {
+      if (a.tbd !== b.tbd) return a.tbd ? 1 : -1;
+      return (a.scheduled_at || "").localeCompare(b.scheduled_at || "");
+    });
+
+    bracketList.innerHTML = "";
+    sorted.forEach((m) => {
+      const div = document.createElement("div");
+      div.className = "position-row" + (m.tbd ? " resolved" : "");
+      const roundLabel = (m.name || "").split(":")[0]; // "Round of 32 match 1"
+      const badge = m.tbd
+        ? '<span class="badge-redeemable" style="color:var(--muted);border-color:var(--border);" title="Соперники ещё не определены">TBD</span>'
+        : "";
+      div.innerHTML = `
+        <div class="pos-main">
+          <div class="pos-title">${escapeHtml(m.team_a)} vs ${escapeHtml(m.team_b)} ${badge}</div>
+          <div class="pos-sub">${escapeHtml(roundLabel)} · Bo${m.best_of || "?"} · ${fmtScheduled(m.scheduled_at)}</div>
+        </div>
+        <button class="btn-accent" ${m.tbd ? "disabled" : ""}>Добавить как этап</button>
+      `;
+      const btn = div.querySelector("button");
+      if (!m.tbd) btn.addEventListener("click", () => addBracketMatchAsStage(m, roundLabel));
+      bracketList.appendChild(div);
+    });
+  }
+
+  function addBracketMatchAsStage(m, roundLabel) {
+    rows.push({
+      id: nextId++, coefficient: 0, status: STATUS.PENDING, asset: null, liveNote: null,
+      matchLabel: `${m.team_a} vs ${m.team_b} (${roundLabel})`,
+    });
+    render();
+    bracketStatus.classList.remove("err");
+    bracketStatus.textContent = `Добавлено как новый этап: ${m.team_a} vs ${m.team_b}.`;
+  }
+
+  fetchBracketBtn.addEventListener("click", fetchBracket);
+
   render();
   if (savedAddress) fetchPositions();
+  if (savedTournamentId) fetchBracket();
 </script>
 </body>
 </html>

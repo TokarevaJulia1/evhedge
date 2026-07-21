@@ -29,8 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from evhedge.data_sources import pandascore as pandascore_ds
 from evhedge.data_sources import polymarket as polymarket_ds
+from evhedge.data_sources.pandascore import PandaScoreError
 from evhedge.data_sources.polymarket import PolymarketAPIError
+from evhedge.team_aliases import canonical_name, load_default_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,38 @@ def book_payload(token_id: str) -> dict:
     book = polymarket_ds.fetch_order_book(token_id)
     bid, ask = polymarket_ds.best_bid_ask(book)
     return {"bid": bid, "ask": ask}
+
+
+def bracket_payload(tournament_id: int) -> list[dict]:
+    """The full known bracket for one PandaScore Tournament (id, NOT a
+    Series -- see ``data_sources.pandascore.fetch_tournament_brackets``):
+    every already-paired match AND every not-yet-decided future round as
+    a TBD placeholder, team names canonicalized through the SAME alias
+    map ``collect.py``/``pandascore_sync.py`` use -- one matcher, not a
+    second one just for the dashboard."""
+    budget = pandascore_ds.RequestBudget()
+    raw = pandascore_ds.fetch_tournament_brackets(tournament_id, budget)
+    alias_map = load_default_aliases()
+
+    out = []
+    for m in raw:
+        opponents = m.get("opponents") or []
+        tbd = len(opponents) < 2
+        if tbd:
+            team_a, team_b = "TBD", "TBD"
+        else:
+            team_a = canonical_name(opponents[0]["opponent"]["name"], alias_map)
+            team_b = canonical_name(opponents[1]["opponent"]["name"], alias_map)
+        out.append({
+            "name": m.get("name"),
+            "team_a": team_a,
+            "team_b": team_b,
+            "status": m.get("status"),
+            "scheduled_at": m.get("scheduled_at"),
+            "best_of": m.get("number_of_games"),
+            "tbd": tbd,
+        })
+    return out
 
 
 _CONTENT_TYPES = {
@@ -117,8 +152,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, book_payload(token_id))
                 return
+            if parsed.path == "/api/bracket":
+                tournament_id = (qs.get("tournament_id") or [None])[0]
+                if not tournament_id or not tournament_id.isdigit():
+                    self._send_json(400, {"error": "укажите ?tournament_id=<число>"})
+                    return
+                self._send_json(200, bracket_payload(int(tournament_id)))
+                return
             self._send_static(parsed.path)
         except PolymarketAPIError as e:
+            self._send_json(502, {"error": str(e)})
+        except PandaScoreError as e:
             self._send_json(502, {"error": str(e)})
         except Exception as e:  # last resort -- never leak a raw traceback to the browser
             logger.exception("unhandled error serving %s", self.path)

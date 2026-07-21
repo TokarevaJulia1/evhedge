@@ -20,6 +20,7 @@ from evhedge.data_sources.pandascore import (
     fetch_matches,
     fetch_series,
     fetch_teams,
+    fetch_tournament_brackets,
 )
 
 
@@ -190,3 +191,36 @@ def test_fetch_teams_real_fixture_shows_two_distinct_falcons_entities(monkeypatc
     assert teams == real_fixture
     names = {t["name"] for t in teams}
     assert {"Falcons", "Team Falcons"} <= names  # both present, module doesn't collapse them
+
+
+def test_fetch_tournament_brackets_uses_non_game_prefixed_path(monkeypatch):
+    """Real fixture shape from GET /tournaments/21474/brackets (BLAST
+    Bounty Qualifier, captured live 2026-07-21): 2 real Round-of-32
+    pairs plus a Round-of-16 TBD placeholder (opponents: [])."""
+    captured = {}
+    real_fixture = [
+        {
+            "id": 1, "name": "Round of 32 match 1: TL vs VIT", "status": "not_started",
+            "scheduled_at": "2026-07-24T18:30:00Z", "number_of_games": 3,
+            "opponents": [
+                {"opponent": {"id": 1, "name": "Liquid"}},
+                {"opponent": {"id": 2, "name": "Vitality"}},
+            ],
+        },
+        {
+            "id": 2, "name": "Round of 16 match 1: TBD vs TBD", "status": "not_started",
+            "scheduled_at": "2026-07-26T10:00:00Z", "number_of_games": 3,
+            "opponents": [],
+        },
+    ]
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["url"] = url
+        return FakeResponse(real_fixture, 200, {"X-Rate-Limit-Remaining": "900"})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    rows = fetch_tournament_brackets(21474, RequestBudget())
+    assert rows == real_fixture
+    assert captured["url"] == "https://api.pandascore.co/tournaments/21474/brackets"
+    assert "/csgo/" not in captured["url"]  # confirmed live: NOT game-prefixed

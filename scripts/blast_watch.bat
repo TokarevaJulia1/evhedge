@@ -65,11 +65,18 @@ rem warnings) needs PANDASCORE_TOKEN set in THIS environment before the
 rem loop starts -- not committed anywhere, set it yourself
 rem (`set PANDASCORE_TOKEN=...` before running this script, or a
 rem permanent user/system env var).
-rem --league-id 4321 = BLAST Premier (the parent league, confirmed live
-rem 2026-07-20) -- PandaScore had NOT yet created a "BLAST Bounty 2026
-rem Season 2" series/matches as of that check (same timing gap as the
-rem Gamma match-listing one above); syncing by league_id returns 0 rows
-rem harmlessly until PandaScore adds it, no code change needed then.
+rem --league-id 5426 = "BLAST Bounty" -- CORRECTED 2026-07-21. Originally
+rem guessed as 4321 "BLAST Premier" (a genuinely related, similarly-named
+rem league) before any real BLAST Bounty match existed in PandaScore to
+rem check against -- wrong: PandaScore tracks BLAST Bounty as its OWN
+rem top-level league, not nested under BLAST Premier. Confirmed live by
+rem looking up a real team's (Vitality, id 3455) upcoming match directly
+rem and reading its actual league_id/name off the response, rather than
+rem trusting the guessed id another time. tournament_id 21474 ("Qualifier",
+rem this stage) also confirmed live via GET /tournaments/{id}/brackets --
+rem that endpoint returns the FULL known stage structure in one call,
+rem including not-yet-decided future rounds as TBD-vs-TBD placeholders
+rem (24 rows: 16 Round-of-32 pairs + 8 Round-of-16 slots waiting on them).
 rem `deadlines --hours 2` prints its own warning (via warn_console) for
 rem any leg starting inside 2h with no predictions row yet -- that IS
 rem the watcher-loop warning-log requirement, not a separate mechanism.
@@ -89,7 +96,7 @@ if errorlevel 1 echo [%date% %time%] pull failed (network?) -- retrying in 15 mi
 
 echo [%date% %time%] evhedge pandascore sync...
 python -m evhedge.cli pandascore sync --db data\blast2026.db ^
-  --tournament "BLAST Bounty 2026 Season 2" --league-id 4321
+  --tournament "BLAST Bounty 2026 Season 2" --league-id 5426
 if errorlevel 1 (
   echo [%date% %time%] pandascore sync failed -- PANDASCORE_TOKEN set? network?
 ) else (

@@ -304,3 +304,40 @@ def fetch_teams(
     """
     params = {"search[name]": name_search, "per_page": per_page}
     return _get_list(f"{BASE_URL}/{GAME_PATH}/teams", params, budget, max_pages=1)
+
+
+# ---------------------------------------------------------------------------
+# Tournament brackets
+# ---------------------------------------------------------------------------
+
+def fetch_tournament_brackets(
+    tournament_id: int, budget: RequestBudget, per_page: int = 100
+) -> list[dict]:
+    """``GET /tournaments/{id}/brackets`` -- the FULL known bracket for
+    one PandaScore Tournament (= one stage of a Series, see the module
+    docstring), in a single call: every match already paired AND every
+    not-yet-decided future-round slot as a placeholder (``opponents: []``,
+    ``name`` reads e.g. "Round of 16 match 3"). Confirmed live
+    (2026-07-21) against BLAST Bounty's Qualifier stage (tournament id
+    21474): 24 rows for a 32-team bracket -- 16 Round-of-32 pairs with
+    real opponents plus 8 Round-of-16 slots waiting on them.
+
+    Unlike every other endpoint in this module, the path is NOT
+    game-prefixed (``/tournaments/{id}/brackets``, not
+    ``/{GAME_PATH}/tournaments/...``) -- PandaScore tournament ids are
+    unique across games, confirmed against the live OpenAPI example
+    (``/tournaments/1590/brackets``) and by calling it successfully this
+    way. "All plans" per the live plan-reference doc, like every other
+    endpoint this module wraps.
+
+    Args:
+        tournament_id: A PandaScore Tournament id -- e.g. from a match's
+            own ``tournament.id`` field (see ``fetch_matches``), NOT a
+            Series id.
+
+    Returns:
+        Raw match dicts, same shape as ``fetch_matches``'s -- a
+        placeholder future-round match has ``opponents: []`` and no
+        ``id``-resolvable teams yet.
+    """
+    return _get_list(f"{BASE_URL}/tournaments/{tournament_id}/brackets", {"per_page": per_page}, budget)
