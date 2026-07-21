@@ -90,6 +90,19 @@
   /* --- params --- */
   .params-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
   .params-grid-single { grid-template-columns: minmax(0, 320px); }
+  .base-derived {
+    font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px; line-height: 1.5;
+  }
+  .base-derived b { color: var(--accent); }
+
+  /* --- margin / breakeven --- */
+  .margin-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .margin-figure { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 700; }
+  .margin-figure.ok { color: var(--profit); }
+  .margin-figure.bad { color: var(--loss); }
+  .margin-note { color: var(--muted); font-size: 12px; max-width: 480px; }
+  .breakeven-warn { color: #E3A73F; font-size: 12px; margin-top: 2px; }
 
   /* --- table --- */
   .table-head-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
@@ -117,6 +130,7 @@
   .lock-note { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--font-ui); font-size: 13px; }
   .status-pill-completed { border-color: #3FDB9255 !important; color: var(--profit) !important; }
   .status-pill-pending { border-color: #E3A73F55 !important; color: #E3A73F !important; }
+  .status-pill-lost { border-color: #E5484D55 !important; color: var(--loss) !important; }
   .empty-row td { text-align: center; color: var(--muted); padding: 32px 0; font-family: var(--font-ui); }
   .live-tag {
     display: inline-block; margin-left: 6px; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
@@ -176,13 +190,21 @@
     <div class="positions-list" id="bracketList"></div>
   </section>
 
-  <!-- Базовые параметры -->
+  <!-- Базовые параметры: ставка NO на аутрайт -->
   <section class="card">
-    <div class="eyebrow">Базовые параметры</div>
-    <div class="params-grid params-grid-single">
+    <div class="eyebrow">Ставка NO «команда не выиграет турнир»</div>
+    <div class="params-grid">
       <div>
-        <label class="field-label" for="initialCapital">Начальный капитал ($)</label>
-        <input id="initialCapital" type="number" step="0.01" value="1000" />
+        <label class="field-label" for="noShares">Число долей NO (S)</label>
+        <input id="noShares" type="number" step="0.01" value="1000" />
+      </div>
+      <div>
+        <label class="field-label" for="noPrice">Цена NO, доля (q)</label>
+        <input id="noPrice" type="number" step="0.01" min="0" max="1" value="0.71" />
+      </div>
+      <div>
+        <label class="field-label">Заморожено / выплата / в ролловер</label>
+        <div class="base-derived" id="baseDerived">—</div>
       </div>
     </div>
   </section>
@@ -202,11 +224,11 @@
           <tr>
             <th>№</th>
             <th>Матч</th>
-            <th>Коэффициент доходности</th>
-            <th>Сумма сделки ($)</th>
-            <th>Чистый доход ($)</th>
-            <th>Баланс после ($)</th>
-            <th>Импл. цена / Шардов</th>
+            <th>Цена YES (p)</th>
+            <th>Ставка ($)</th>
+            <th>Банк после ($)</th>
+            <th>Долей купить</th>
+            <th>Граница безубытка</th>
             <th>Статус</th>
             <th></th>
           </tr>
@@ -216,10 +238,19 @@
     </div>
   </section>
 
+  <!-- Запас окупаемости -->
+  <section class="card margin-card" id="marginCard">
+    <div>
+      <div class="eyebrow">Запас окупаемости цепочки</div>
+      <div class="margin-note" id="marginNote">∏p ≤ (1−q) — произведение цен всех ног не должно превышать премию NO.</div>
+    </div>
+    <div class="margin-figure" id="marginFigure">—</div>
+  </section>
+
   <!-- Итоги -->
   <section class="totals-grid totals-grid-single">
     <div class="card total-card pnl" id="pnlCard">
-      <div class="eyebrow">Итоговый PnL (чистая прибыль цепочки)</div>
+      <div class="eyebrow" id="pnlLabel">Итоговый PnL (чистая прибыль цепочки)</div>
       <div class="total-figure" id="netPnl">$0.00</div>
     </div>
   </section>
@@ -227,14 +258,19 @@
 </div>
 
 <script>
-  const STATUS = { COMPLETED: "completed", PENDING: "pending" };
+  // Статусы ноги ролловера: PENDING -- ещё не сыграна (следующие ноги
+  // заблокированы, т.к. неизвестен банк для них); WON -- раунд выигран,
+  // весь банк перекатывается дальше; LOST -- команда вылетела на этой
+  // ноге. Раньше PnL считался построчно; теперь ветка LOST даёт
+  // структурный ноль (см. чат), а не "убыток по строке" -- см. computeChain.
+  const STATUS = { PENDING: "pending", WON: "won", LOST: "lost" };
 
   // Каждая строка может нести привязанную живую позицию Polymarket
   // (asset = CLOB token id) -- только для строки, реально загруженной
   // из открытой позиции; гипотетические будущие этапы её не имеют.
   let rows = [
-    { id: 1, coefficient: 0.85, status: STATUS.COMPLETED, asset: null, liveNote: null, matchLabel: "" },
-    { id: 2, coefficient: 0.6, status: STATUS.PENDING, asset: null, liveNote: null, matchLabel: "" },
+    { id: 1, price: 0.55, status: STATUS.WON, asset: null, liveNote: null, matchLabel: "" },
+    { id: 2, price: 0.45, status: STATUS.PENDING, asset: null, liveNote: null, matchLabel: "" },
   ];
   let nextId = 3;
 
@@ -253,46 +289,111 @@
   }
 
   const $ = (id) => document.getElementById(id);
-  const initialCapitalEl = $("initialCapital");
+  const noSharesEl = $("noShares");
+  const noPriceEl = $("noPrice");
+  const baseDerivedEl = $("baseDerived");
   const rowsBody = $("rowsBody");
   const strategyNameEl = $("strategyName");
 
   // ---------- расчёт цепочки ----------
+  //
+  // Модель (см. чат): покупаем NO на "команда не выиграет турнир" --
+  // S долей по цене q. Заморожено C = S*q, выплата NO по победе N = S,
+  // профит NO P = S*(1-q) целиком уходит в ролловер как первая ставка.
+  // Каждая нога: ставка = банк с прошлой ноги, банк после = ставка/p
+  // (p -- цена YES на победу в этом раунде). Вылет на любой ноге --
+  // структурный ноль (сгорает именно накопленный банк, не что-то
+  // "сверху"). Титул (все ноги выиграны) -- PnL = банк_после_последней − N.
+
+  function baseParams() {
+    const S = parseFloat(noSharesEl.value) || 0;
+    const q = parseFloat(noPriceEl.value) || 0;
+    const C = S * q;
+    const N = S;
+    const P = S * (1 - q);
+    return { S, q, C, N, P };
+  }
 
   function computeChain() {
-    const initialCapital = parseFloat(initialCapitalEl.value) || 0;
-    let carryBalance = initialCapital;
+    const { S, N, P } = baseParams();
+    let carryBank = P;
     let unlocked = true;
+    let eliminatedAtIdx = null;
 
-    return rows.map((row) => {
+    const computed = rows.map((row, idx) => {
       const reachable = unlocked;
-      const tradeAmount = reachable ? carryBalance : null;
-      const netProfit = reachable ? tradeAmount * row.coefficient : null;
-      const balanceAfter = reachable ? tradeAmount + netProfit : null;
-
-      // Подразумеваемая цена входа при выплате $1/акция:
-      // netProfit = tradeAmount*coef  =>  d = 1+coef (decimal odds),
-      // impliedPrice = 1/d, shares = tradeAmount/impliedPrice = balanceAfter.
-      const impliedPrice = reachable && (1 + row.coefficient) > 0 ? 1 / (1 + row.coefficient) : null;
-      const shares = reachable ? balanceAfter : null;
-
-      if (reachable) {
-        carryBalance = balanceAfter;
-        if (row.status !== STATUS.COMPLETED) unlocked = false;
-      } else {
-        unlocked = false;
+      if (!reachable) {
+        return Object.assign({}, row, { reachable: false });
       }
-      return Object.assign({}, row, { reachable, tradeAmount, netProfit, balanceAfter, impliedPrice, shares });
+
+      const p = row.price;
+      const stake = carryBank;
+      const bank = p > 0 ? stake / p : null;
+      const shares = bank;
+      // Граница безубытка ЭТОЙ ноги, если бы она была последней: цена
+      // не должна превышать banks/S, иначе ветка "титул" уйдёт в минус.
+      const breakeven = S > 0 ? stake / S : null;
+      const overBreakeven = breakeven !== null && p > breakeven;
+      const partialStake = overBreakeven ? S * p : null;
+      const pocket = overBreakeven ? stake - partialStake : null;
+
+      const out = Object.assign({}, row, {
+        reachable: true, stake, bank, shares, breakeven, overBreakeven, partialStake, pocket,
+      });
+
+      if (row.status === STATUS.WON) {
+        carryBank = bank !== null ? bank : carryBank;
+      } else if (row.status === STATUS.LOST) {
+        if (eliminatedAtIdx === null) eliminatedAtIdx = idx;
+        unlocked = false;
+      } else {
+        unlocked = false; // PENDING -- следующая нога ещё не может знать свой банк
+      }
+      return out;
     });
+
+    const n = computed.length;
+    const last = n > 0 ? computed[n - 1] : null;
+    const champion = eliminatedAtIdx === null && last && last.reachable && last.status === STATUS.WON;
+    const inProgress = eliminatedAtIdx === null && !champion;
+
+    let netPnl = null;
+    if (eliminatedAtIdx !== null) {
+      netPnl = 0; // структурный ноль на вылете
+    } else if (champion) {
+      netPnl = (last.bank !== null ? last.bank : 0) - N;
+    }
+
+    // Запас окупаемости по ВСЕМ введённым ценам ног (план целиком, вне
+    // зависимости от того, что уже сыграно) -- ∏p ≤ (1-q).
+    const priceProduct = rows.reduce((acc, r) => (r.price > 0 ? acc * r.price : acc), 1);
+    const projectedFinalBank = rows.reduce((bank, r) => (r.price > 0 ? bank / r.price : bank), P);
+    const projectedPnl = projectedFinalBank - N;
+
+    return { computed, eliminatedAtIdx, champion, inProgress, netPnl, priceProduct, projectedPnl };
   }
 
   function render() {
-    const computed = computeChain();
+    const { S, q, C, N, P } = baseParams();
+    const { computed, eliminatedAtIdx, champion, inProgress, netPnl, priceProduct, projectedPnl } = computeChain();
+
+    baseDerivedEl.innerHTML = `заморожено C = <b>${formatMoney(C)}</b> · выплата N = <b>${formatMoney(N)}</b> · в ролловер P = <b>${formatMoney(P)}</b>`;
 
     rowsBody.innerHTML = "";
     if (computed.length === 0) {
       rowsBody.innerHTML = '<tr class="empty-row"><td colspan="9">Цепочка пуста — добавьте первый этап.</td></tr>';
     }
+
+    const statusLabels = {
+      [STATUS.PENDING]: "В ожидании",
+      [STATUS.WON]: "Выигран",
+      [STATUS.LOST]: "Вылет",
+    };
+    const statusPillClass = {
+      [STATUS.PENDING]: "status-pill-pending",
+      [STATUS.WON]: "status-pill-completed",
+      [STATUS.LOST]: "status-pill-lost",
+    };
 
     computed.forEach((row, idx) => {
       const tr = document.createElement("tr");
@@ -300,12 +401,15 @@
 
       const lockNote = '<span class="lock-note"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><rect x="4.5" y="9" width="11" height="7.5" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M6.5 9V6.5a3.5 3.5 0 017 0V9" stroke="currentColor" stroke-width="1.4"/></svg>ожидание</span>';
 
-      const profitClass = row.reachable ? (row.netProfit >= 0 ? "profit" : "loss") : "";
-      const statusPillClass = row.status === STATUS.COMPLETED ? "status-pill-completed" : "status-pill-pending";
+      const sharesCell = row.reachable && row.shares !== null
+        ? `<b>${Math.round(row.shares).toLocaleString()}</b> шт.`
+        : "—";
 
-      const impliedCell = row.reachable && row.impliedPrice !== null
-        ? `<span class="implied-cell">${(row.impliedPrice * 100).toFixed(1)}¢ → <b>${Math.round(row.shares).toLocaleString()}</b> шт.</span>`
-        : '<span class="implied-cell">—</span>';
+      const breakevenCell = row.reachable && row.breakeven !== null
+        ? `${(row.breakeven * 100).toFixed(1)}¢` + (row.overBreakeven
+            ? `<div class="breakeven-warn">цена выше границы — частичный перекат: ${formatMoney(row.partialStake)} в ставку, ${formatMoney(row.pocket)} в карман</div>`
+            : "")
+        : "—";
 
       const liveBtn = row.asset
         ? `<button class="btn-ghost" data-live-id="${row.id}" title="Подтянуть текущий bid/ask с реального ордербука">книга</button>`
@@ -318,16 +422,17 @@
           <input type="text" data-id="${row.id}" data-field="matchLabel" value="${escapeAttr(row.matchLabel || "")}" ${row.reachable ? "" : "disabled"} placeholder="команда А vs команда Б" />
         </td>
         <td class="coef-cell">
-          <input type="number" step="0.01" data-id="${row.id}" data-field="coefficient" value="${row.coefficient}" ${row.reachable ? "" : "disabled"} placeholder="0.85" />
+          <input type="number" step="0.01" min="0" max="1" data-id="${row.id}" data-field="price" value="${row.price}" ${row.reachable ? "" : "disabled"} placeholder="0.55" />
         </td>
-        <td class="amount">${row.reachable ? formatMoney(row.tradeAmount) : lockNote}</td>
-        <td class="amount ${profitClass}">${row.reachable ? formatMoney(row.netProfit, true) : "—"}</td>
-        <td class="amount">${row.reachable ? formatMoney(row.balanceAfter) : "—"}</td>
-        <td>${impliedCell} ${liveBtn} ${liveNote}</td>
+        <td class="amount">${row.reachable ? formatMoney(row.stake) : lockNote}</td>
+        <td class="amount">${row.reachable ? formatMoney(row.bank) : "—"}</td>
+        <td>${sharesCell} ${liveBtn} ${liveNote}</td>
+        <td class="implied-cell">${breakevenCell}</td>
         <td class="status-cell">
-          <select data-id="${row.id}" data-field="status" class="${statusPillClass}" ${row.reachable ? "" : "disabled"}>
-            <option value="${STATUS.COMPLETED}" ${row.status === STATUS.COMPLETED ? "selected" : ""}>Завершено</option>
-            <option value="${STATUS.PENDING}" ${row.status === STATUS.PENDING ? "selected" : ""}>В ожидании</option>
+          <select data-id="${row.id}" data-field="status" class="${statusPillClass[row.status]}" ${row.reachable ? "" : "disabled"}>
+            <option value="${STATUS.PENDING}" ${row.status === STATUS.PENDING ? "selected" : ""}>${statusLabels[STATUS.PENDING]}</option>
+            <option value="${STATUS.WON}" ${row.status === STATUS.WON ? "selected" : ""}>${statusLabels[STATUS.WON]}</option>
+            <option value="${STATUS.LOST}" ${row.status === STATUS.LOST ? "selected" : ""}>${statusLabels[STATUS.LOST]}</option>
           </select>
         </td>
         <td>
@@ -339,18 +444,43 @@
       rowsBody.appendChild(tr);
     });
 
-    // Хеджа как отдельной статьи расходов в стратегии нет -- каждый этап
-    // цепочки САМ является хеджем предыдущего (см. чат: перекат = ставка
-    // на следующий матч из уже гарантированного профита). PnL = сумма
-    // чистого дохода завершённых этапов, без вычитаемых посторонних сумм.
-    const netPnl = computed.reduce((sum, r) => (r.reachable && r.status === STATUS.COMPLETED) ? sum + r.netProfit : sum, 0);
+    // Запас окупаемости: ∏p ≤ (1-q) -- см. чат, шаг 4.
+    const margin = priceProduct > 0 ? (1 - q) / priceProduct : null;
+    const marginFigureEl = $("marginFigure");
+    const marginNoteEl = $("marginNote");
+    if (margin === null) {
+      marginFigureEl.textContent = "—";
+      marginFigureEl.className = "margin-figure";
+      marginNoteEl.textContent = "Введите цены YES по всем ногам, чтобы увидеть запас.";
+    } else {
+      marginFigureEl.textContent = `запас ×${margin.toFixed(2)}`;
+      marginFigureEl.className = "margin-figure " + (margin >= 1 ? "ok" : "bad");
+      marginNoteEl.textContent = margin >= 1
+        ? `Цепочка окупается при любом исходе (∏p = ${(priceProduct * 100).toFixed(1)}¢ ≤ ${((1 - q) * 100).toFixed(1)}¢ премии NO). Прогноз при титуле по текущим ценам: ${formatMoney(projectedPnl, true)}.`
+        : `Ветка «чемпион» уйдёт в минус при текущих ценах (∏p = ${(priceProduct * 100).toFixed(1)}¢ > ${((1 - q) * 100).toFixed(1)}¢ премии NO). Прогноз при титуле: ${formatMoney(projectedPnl, true)}.`;
+    }
 
+    // PnL: вылет -- структурный ноль; титул -- банк_после_последней - N;
+    // иначе цепочка ещё не резолвнулась (см. чат, шаг 3/4).
     const pnlEl = $("netPnl");
-    pnlEl.textContent = formatMoney(netPnl, true);
-    pnlEl.className = "total-figure " + (netPnl >= 0 ? "profit" : "loss");
+    const pnlLabelEl = $("pnlLabel");
     const pnlCard = $("pnlCard");
     pnlCard.classList.remove("is-profit", "is-loss");
-    pnlCard.classList.add(netPnl >= 0 ? "is-profit" : "is-loss");
+    if (eliminatedAtIdx !== null) {
+      pnlLabelEl.textContent = `Итоговый PnL — вылет на ноге №${eliminatedAtIdx + 1} (структурный ноль)`;
+      pnlEl.textContent = formatMoney(0, true);
+      pnlEl.className = "total-figure profit";
+      pnlCard.classList.add("is-profit");
+    } else if (champion) {
+      pnlLabelEl.textContent = "Итоговый PnL — команда чемпион";
+      pnlEl.textContent = formatMoney(netPnl, true);
+      pnlEl.className = "total-figure " + (netPnl >= 0 ? "profit" : "loss");
+      pnlCard.classList.add(netPnl >= 0 ? "is-profit" : "is-loss");
+    } else {
+      pnlLabelEl.textContent = "Итоговый PnL — цепочка ещё в процессе";
+      pnlEl.textContent = "—";
+      pnlEl.className = "total-figure";
+    }
 
     rowsBody.querySelectorAll("input[data-field], select[data-field]").forEach((el) => {
       el.addEventListener("change", (e) => {
@@ -358,7 +488,7 @@
         const field = e.target.dataset.field;
         const row = rows.find((r) => r.id === id);
         if (!row) return;
-        row[field] = field === "coefficient" ? (parseFloat(e.target.value) || 0) : e.target.value;
+        row[field] = field === "price" ? (parseFloat(e.target.value) || 0) : e.target.value;
         render();
       });
     });
@@ -375,11 +505,12 @@
   }
 
   $("addRowBtn").addEventListener("click", () => {
-    rows.push({ id: nextId++, coefficient: 0, status: STATUS.PENDING, asset: null, liveNote: null, matchLabel: "" });
+    rows.push({ id: nextId++, price: 0.5, status: STATUS.PENDING, asset: null, liveNote: null, matchLabel: "" });
     render();
   });
 
-  initialCapitalEl.addEventListener("input", render);
+  noSharesEl.addEventListener("input", render);
+  noPriceEl.addEventListener("input", render);
 
   // ---------- Polymarket: живые позиции ----------
 
@@ -449,40 +580,30 @@
   }
 
   function loadPositionIntoChain(p) {
+    // Загружаемая позиция -- это НАЗЕМНАЯ NO-ставка "команда не выиграет
+    // турнир" (см. чат: постановка задачи), т.е. её size/avgPrice и есть
+    // S/q базовых параметров. Строки цепочки (ноги ролловера по матчам)
+    // заполняются отдельно -- у них своя цена YES на конкретный раунд,
+    // которой в этой позиции просто нет.
     strategyNameEl.value = p.title || strategyNameEl.value;
-    initialCapitalEl.value = (p.initialValue || 0).toFixed(2);
-
-    if (rows.length > 0) {
-      rows[0].asset = p.asset || null;
-      rows[0].liveNote = null;
-      if (p.oppositeOutcome) {
-        rows[0].matchLabel = `${p.outcome} vs ${p.oppositeOutcome}`;
-      }
-
-      if (p.redeemable) {
-        // Рынок реально резолвнулся -- коэффициент считаем из ФАКТИЧЕСКОГО
-        // исхода (currentValue/initialValue), а не оставляем дефолтные
-        // 0.85/"Завершено" от пустой строки. initialValue=0 -- защита от
-        // деления на ноль (не должно случаться у реальной позиции).
-        const realized = p.initialValue ? (p.currentValue - p.initialValue) / p.initialValue : 0;
-        rows[0].coefficient = Math.round(realized * 10000) / 10000;
-        rows[0].status = STATUS.COMPLETED;
-      } else {
-        // Рынок ещё не резолвнулся -- реального исхода нет, коэффициент
-        // фиктивным не оставляем, статус явно "В ожидании".
-        rows[0].coefficient = 0;
-        rows[0].status = STATUS.PENDING;
-      }
-    }
-
+    noSharesEl.value = (p.size || 0).toFixed(4);
+    noPriceEl.value = (p.avgPrice || 0).toFixed(4);
     render();
-    connStatus.classList.remove("err");
-    const outcomeNote = p.redeemable
-      ? `фактический результат: ${(rows[0].coefficient * 100).toFixed(1)}%`
-      : "рынок ещё не резолвнулся, коэффициент введите вручную после исхода";
-    connStatus.textContent = `Загружено: "${p.title}" (${p.outcome}) → строка 1 привязана к живому ордербоку, ${outcomeNote}.`;
 
-    if (p.outcome && p.oppositeOutcome) {
+    connStatus.classList.remove("err");
+    let resolvedNote = "рынок ещё не резолвнулся";
+    if (p.redeemable) {
+      resolvedNote = p.currentValue
+        ? "NO выиграл — команда НЕ стала чемпионом (ветка «вылет», см. вкладку статусов)"
+        : "NO проиграл — команда стала чемпионом (ветка «титул»)";
+    }
+    connStatus.textContent = `Загружено как база NO: "${p.title}" (${p.outcome}), S=${(p.size || 0).toFixed(2)}, q=${pct(p.avgPrice)} — ${resolvedNote}.`;
+
+    // oppositeOutcome нужен для поиска турнира на PandaScore только у
+    // позиций уровня "матч" (Team A vs Team B) -- у outright-рынка "команда
+    // не выиграет турнир" оппозит это "Yes"/"No", не название команды.
+    const opp = (p.oppositeOutcome || "").toLowerCase();
+    if (p.outcome && p.oppositeOutcome && opp !== "yes" && opp !== "no") {
       lookupPandaScoreTournament(p.outcome, p.oppositeOutcome);
     }
   }
@@ -598,7 +719,7 @@
 
   function addBracketMatchAsStage(m, roundLabel) {
     rows.push({
-      id: nextId++, coefficient: 0, status: STATUS.PENDING, asset: null, liveNote: null,
+      id: nextId++, price: 0.5, status: STATUS.PENDING, asset: null, liveNote: null,
       matchLabel: `${m.team_a} vs ${m.team_b} (${roundLabel})`,
     });
     render();
